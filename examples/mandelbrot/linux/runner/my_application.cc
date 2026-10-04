@@ -42,6 +42,13 @@ static void my_application_activate(GApplication* application) {
     }
   }
 #endif
+  // fluffy:begin
+  // Header bar only on GNOME, elsewhere the compositor decorates the window.
+  const gchar* desktop = g_getenv("XDG_CURRENT_DESKTOP");
+  if (desktop == nullptr || g_strstr_len(desktop, -1, "GNOME") == nullptr) {
+    use_header_bar = FALSE;
+  }
+  // fluffy:end
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));

@@ -2,9 +2,9 @@
 
 > **Transparency note:** This project was built with the help of agentic AI. The base skeleton and prototype were written and built manually by a human, and all source code has been reviewed manually by a human. This does not mean there are no bugs ;-)
 
-## :construction: Work in progress :construction:
+![](./screenshot.png)
 
-Fluffy is a CLI tool, still in development, that integrates Go code into a Flutter (Dart) project over FFI.
+Fluffy is a CLI tool, still in development, that integrates Go code into any Flutter (Dart) project. On native targets the Go code is compiled to a C library and called over `dart:ffi`; on the web it runs as WebAssembly. Fluffy hooks into the Flutter build of every native platform, so `flutter run` and `flutter build` compile the Go code automatically (on the web `fluffy run` and `fluffy build` do it), and it generates a typed Dart API from your plain Go functions, services and structs. Underneath, a small message layer carries requests, events and streams in both directions, so Go can call back into Dart as well.
 
 ## Requirements
 - Flutter 3.16 or newer

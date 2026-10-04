@@ -1,5 +1,7 @@
 # roundtrip
 
+![](./screenshot.png)
+
 Checks that values survive the trip between Dart and Go: every kind of type
 the generator maps, the edge cases of JSON numbers, strings, bytes and
 times, errors and panics, Go calling Dart, streams with cancel, and

@@ -1,5 +1,7 @@
 # mandelbrot
 
+![](./screenshot.png)
+
 Heavy work in Go: the Mandelbrot set is rendered by one worker goroutine
 per CPU and streamed to Flutter tile by tile, while the UI stays
 responsive. Every change of the view cancels the running render, and the Go
