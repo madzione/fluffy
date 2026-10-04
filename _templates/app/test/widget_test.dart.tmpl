@@ -1,0 +1,33 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:{{.Package}}/golang/golang.dart';
+import 'package:{{.Package}}/main.dart';
+
+void main() {
+  testWidgets('Counter increments through Go', (WidgetTester tester) async {
+    // Tests run without the Go library, the fake plays its side. Exported
+    // functions get their arguments as a list.
+    final go = Bridge.fake();
+    go.receiver.handle('Add', (data) {
+      final [a, b] = data as List<dynamic>;
+      return (a as int) + (b as int);
+    });
+    go.receiver.handle(
+      'Hello',
+      (data) => 'Hello ${(data as List<dynamic>).first}, from the test!',
+    );
+    go.receiver.stream('Clock', (_) => Stream.value('12:00:00'));
+
+    await tester.pumpWidget(const MyApp());
+    await tester.pump();
+    expect(find.text('Hello Flutter, from the test!'), findsOneWidget);
+    expect(find.text('12:00:00'), findsOneWidget);
+    expect(find.text('0'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Increment'));
+    await tester.pump();
+
+    expect(find.text('0'), findsNothing);
+    expect(find.text('1'), findsOneWidget);
+  });
+}

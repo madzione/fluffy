@@ -1,0 +1,11 @@
+package main
+
+import "{{.Package}}/golang/fluffy"
+
+//go:generate fluffy generate
+
+// main only runs on the web, native platforms load golang/ as a library.
+// Setup that would go here belongs in a fluffy.Start function.
+func main() {
+	fluffy.Serve()
+}

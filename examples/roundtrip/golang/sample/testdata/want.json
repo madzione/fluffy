@@ -1,0 +1,113 @@
+{
+  "kind": "sample",
+  "version": 3,
+  "createdBy": "go",
+  "bool": true,
+  "int": -42,
+  "int8": -128,
+  "uint16": 65535,
+  "int64": 9007199254740991,
+  "float32": 0.1,
+  "float64": -1234.5678,
+  "string": "Grüße, 世界 🧑‍🚀",
+  "color": "teal",
+  "level": "high",
+  "point": [
+    3,
+    -4
+  ],
+  "bytes": "AAECf4D+/w==",
+  "time": "2024-02-29T23:59:59.125+05:30",
+  "duration": 5400250000000,
+  "addr": "2001:db8::1",
+  "array": [
+    1,
+    2,
+    3
+  ],
+  "strings": [
+    "a",
+    "",
+    "c"
+  ],
+  "items": [
+    {
+      "id": 1,
+      "title": "one",
+      "done": false
+    },
+    {
+      "id": 2,
+      "title": "two",
+      "done": true
+    }
+  ],
+  "ptrs": [
+    {
+      "id": 3,
+      "title": "three",
+      "done": false
+    },
+    null
+  ],
+  "matrix": [
+    [
+      1,
+      0.5
+    ],
+    [],
+    [
+      -2.25
+    ]
+  ],
+  "byName": {
+    "x": {
+      "id": 4,
+      "title": "x",
+      "done": false
+    },
+    "y": {
+      "id": 5,
+      "title": "y",
+      "done": false
+    }
+  },
+  "byId": {
+    "-1": "minus one",
+    "7": "seven"
+  },
+  "nested": {
+    "empty": [],
+    "primes": [
+      2,
+      3,
+      5
+    ]
+  },
+  "page": {
+    "items": [
+      {
+        "id": 6,
+        "title": "six",
+        "done": false
+      }
+    ],
+    "next": "page-2"
+  },
+  "child": {
+    "id": 8,
+    "title": "child",
+    "done": false
+  },
+  "any": {
+    "list": [
+      1,
+      "two",
+      null,
+      true
+    ]
+  },
+  "optional": "set",
+  "quoted": "9007199254740991",
+  "Untagged": "untagged"
+}

@@ -1,0 +1,89 @@
+import 'package:flutter/material.dart';
+
+import 'package:{{.Package}}/golang/golang.dart' as golang;
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Flutter + Go',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.cyan),
+      ),
+      home: const MyHomePage(title: 'Flutter + Go'),
+    );
+  }
+}
+
+class MyHomePage extends StatefulWidget {
+  const MyHomePage({super.key, required this.title});
+
+  final String title;
+
+  @override
+  State<MyHomePage> createState() => _MyHomePageState();
+}
+
+class _MyHomePageState extends State<MyHomePage> {
+  int _counter = 0;
+
+  // Go functions from golang/api.go, generated into lib/golang/api.g.dart.
+  final _greeting = golang.hello('Flutter');
+  final _clock = golang.clock();
+
+  Future<void> _incrementCounter() async {
+    final sum = await golang.add(_counter, 1);
+    setState(() => _counter = sum);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: Text(widget.title),
+        actions: [
+          // A stream from Go, a new value every second.
+          StreamBuilder<String>(
+            stream: _clock,
+            builder: (context, snapshot) => Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(snapshot.data ?? ''),
+            ),
+          ),
+        ],
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            FutureBuilder<String>(
+              future: _greeting,
+              builder: (context, snapshot) => Text(
+                snapshot.hasError ? '${snapshot.error}' : snapshot.data ?? '',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+            ),
+            const SizedBox(height: 32),
+            const Text('Go added up the button presses:'),
+            Text(
+              '$_counter',
+              style: Theme.of(context).textTheme.headlineMedium,
+            ),
+          ],
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _incrementCounter,
+        tooltip: 'Increment',
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}

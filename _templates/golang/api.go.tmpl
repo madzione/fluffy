@@ -1,0 +1,58 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// Your Go code lives here. fluffy generate turns the functions marked with
+// //fluffy:export into typed Dart functions in lib/golang/api.g.dart, and
+// fluffy run does that before every run. Arguments and results are sent as
+// JSON, structs become Dart classes that follow their json tags.
+//
+// More ways to talk to Dart, all in golang/fluffy:
+//   - fluffy.Start and fluffy.Bind expose the methods of a service that is
+//     set up once, e.g. with a database, as golang.<namespace>.<method>.
+//   - An interface marked with //fluffy:dart is implemented in Dart, and
+//     Go calls it through the generated new<Name>() function.
+//   - fluffy.Handle, On, Emit and Request work on named channels directly.
+
+// Add adds a and b.
+//
+//fluffy:export
+func Add(a, b int64) int64 {
+	return a + b
+}
+
+// Hello greets name, it fails when name is empty.
+//
+//fluffy:export
+func Hello(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("name is empty")
+	}
+	return fmt.Sprintf("Hello %s, from Go!", name), nil
+}
+
+// Clock sends the time of day every second. A channel result becomes a
+// Dart Stream, ctx ends when Dart stops listening.
+//
+//fluffy:export
+func Clock(ctx context.Context) <-chan string {
+	times := make(chan string)
+	go func() {
+		defer close(times)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				times <- now.Format("15:04:05")
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return times
+}

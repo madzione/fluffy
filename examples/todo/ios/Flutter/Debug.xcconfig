@@ -1,0 +1,6 @@
+#include "Generated.xcconfig"
+
+// fluffy:begin
+OTHER_LDFLAGS = $(inherited) -force_load "$(PROJECT_DIR)/../build/fluffy/ios/$(PLATFORM_NAME)/libgolang.a" -framework CoreFoundation -framework Security -lresolv
+STRIP_STYLE = non-global
+// fluffy:end
