@@ -13,6 +13,8 @@ The repo root is the `fluffy` Go CLI (module `github.com/madzione/fluffy`, `pack
 - `examples/roundtrip/` — conformance checks and fluffy's end-to-end regression test: `golang/sample/` (`Everything`, a field per mapped type, `Want()`, `Diff`, `testdata/want.json` shared with the Dart unit test) and `golang/api.go` (exports + `//fluffy:dart Host`); `lib/checks.dart` holds the checks, used by the app and `integration_test/app_test.dart`. Checks compare on the receiving side; a check with a `note` pins a known limitation. Run on Linux (`fvm flutter test integration_test -d linux`) and web (`fluffy lib web`, chromedriver on 4444, `flutter drive --release ... -d web-server`) after changing the templates or the generator.
 - `examples/mandelbrot/` — heavy work: `golang/fractal/` renders bands in worker goroutines streamed as `Tile`s, cancelled with the Dart subscription (`yield_js.go` sleeps between tiles so Go wasm hands the browser's main thread back); `golang/bench/` + `lib/bench.dart` measure bridge latency/throughput (results in `build/integration_response_data.json` with flutter drive). On Linux each Go→Dart message waits ~1 ms for the embedder's main thread, same as an isolate message.
 
+`skills/fluffy/SKILL.md` is the agent skill for users of fluffy (installation in the README). Update it when commands, generator rules or user-facing behavior change.
+
 `fluffy` is installed with `go install .` into `~/go/bin` (fish: `fish_add_path ~/go/bin`). Inside an example prefer `fvm flutter ...` when it has a `.fvmrc`.
 
 ## Commands

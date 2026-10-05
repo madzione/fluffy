@@ -191,6 +191,17 @@ cd examples/todo
 fluffy run
 ```
 
+## Agent skill
+
+[`skills/fluffy/SKILL.md`](skills/fluffy/SKILL.md) is an [agent skill](https://docs.claude.com/en/docs/claude-code/skills) that teaches coding agents like Claude Code how to work in a fluffy project: the commands, which files are generated or owned by fluffy, how Go turns into Dart, testing and the usual pitfalls. Install it for all your projects:
+
+```sh
+mkdir -p ~/.claude/skills/fluffy
+curl -fsSL https://raw.githubusercontent.com/madzione/fluffy/main/skills/fluffy/SKILL.md -o ~/.claude/skills/fluffy/SKILL.md
+```
+
+or for one project (commit it so everyone working on the app gets it) by putting it into `.claude/skills/fluffy/SKILL.md` instead. Other agents that support skills read the same file from their own skills directory.
+
 ## Generated API
 
 `fluffy generate` reads the Go code and writes the Dart side of it, so Go and Dart can't drift apart. The Go signatures are the schema: there is no extra schema file. Channel names, argument shapes and types are checked when Dart compiles, not when a message fails at runtime.
