@@ -11,10 +11,10 @@ import (
 	"time"
 )
 
-// handler gets the raw JSON data of a message and returns the answer for
-// requests, or a stream for subscriptions. The answer of an emitted message
-// is dropped. ctx ends when Dart cancels a subscription.
-type handler func(ctx context.Context, data json.RawMessage) (any, error)
+// handler gets the raw JSON data and the blobs of a message and returns the
+// answer for requests, or a stream for subscriptions. The answer of an
+// emitted message is dropped. ctx ends when Dart cancels a subscription.
+type handler func(ctx context.Context, data json.RawMessage, blobs []blob) (any, error)
 
 // stream returns the next value of a subscription, ok is false once the
 // stream has ended or ctx is done.
@@ -30,9 +30,9 @@ var handlers sync.Map // channel -> handler
 // Handlers run in their own goroutine, register them in an init function so
 // they exist before Dart sends the first message.
 func Handle[T, R any](channel string, fn func(T) (R, error)) {
-	handlers.Store(channel, handler(func(_ context.Context, data json.RawMessage) (any, error) {
+	handlers.Store(channel, handler(func(_ context.Context, data json.RawMessage, blobs []blob) (any, error) {
 		var arg T
-		if err := decode(data, &arg); err != nil {
+		if err := decode(data, blobs, &arg); err != nil {
 			return nil, fmt.Errorf("invalid data: %w", err)
 		}
 		return fn(arg)
@@ -65,12 +65,15 @@ func Remove(channel string) {
 // its context ends when Dart stops listening, the contexts of other calls
 // never end.
 //
+// A byte slice, as an argument, result or stream value or as a field of a
+// struct there, travels as raw bytes instead of base64.
+//
 // Close a stream's channel when it ends, also when it stops because its
 // context ended. After a cancel the channel is drained so a sender that
 // misses the context is not blocked, but only until the channel is closed or
-// idle for a few seconds. Streams have no backpressure: Go sends as fast as
-// the channel delivers and Dart buffers what its listener has not handled
-// yet, so pace fast producers yourself.
+// idle for a few seconds. Streams have backpressure: Go stops receiving from
+// the channel while Dart has not handled maxUnacked values or
+// maxUnackedBytes yet, for example while the Dart subscription is paused.
 //
 // Bind is meant for Start functions, where the services of an app are
 // created. fluffy generate writes the typed Dart class for it.
@@ -137,13 +140,17 @@ func funcHandler(fn reflect.Value) (handler, error) {
 		return nil, errors.New("results must be nothing, R, error or (R, error)")
 	}
 
-	return func(ctx context.Context, data json.RawMessage) (any, error) {
+	return func(ctx context.Context, data json.RawMessage, blobs []blob) (any, error) {
 		var raw []json.RawMessage
-		if err := decode(data, &raw); err != nil {
+		if err := decode(data, nil, &raw); err != nil {
 			return nil, fmt.Errorf("invalid arguments, want a JSON array: %w", err)
 		}
 		if len(raw) != len(params) {
 			return nil, fmt.Errorf("got %d arguments, want %d", len(raw), len(params))
+		}
+		argBlobs, err := splitArgs(blobs, len(params))
+		if err != nil {
+			return nil, err
 		}
 		args := make([]reflect.Value, 0, t.NumIn())
 		if withContext {
@@ -151,7 +158,11 @@ func funcHandler(fn reflect.Value) (handler, error) {
 		}
 		for i, param := range params {
 			arg := reflect.New(param)
-			if err := decode(raw[i], arg.Interface()); err != nil {
+			var blobs []blob
+			if argBlobs != nil {
+				blobs = argBlobs[i]
+			}
+			if err := decode(raw[i], blobs, arg.Interface()); err != nil {
 				return nil, fmt.Errorf("invalid argument %d: %w", i+1, err)
 			}
 			args = append(args, arg.Elem())
@@ -184,11 +195,15 @@ func chanStream(ch reflect.Value) stream {
 	if ch.IsNil() {
 		return func(context.Context) (any, bool) { return nil, false }
 	}
+	var cases []reflect.SelectCase
 	return func(ctx context.Context) (any, bool) {
-		chosen, value, ok := reflect.Select([]reflect.SelectCase{
-			{Dir: reflect.SelectRecv, Chan: ch},
-			{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())},
-		})
+		if cases == nil {
+			cases = []reflect.SelectCase{
+				{Dir: reflect.SelectRecv, Chan: ch},
+				{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())},
+			}
+		}
+		chosen, value, ok := reflect.Select(cases)
 		if chosen == 0 && ok {
 			return value.Interface(), true
 		}
@@ -222,7 +237,9 @@ func drain(ch reflect.Value, idle time.Duration) {
 }
 
 // dispatch answers a request or emit that arrived on the connection conn.
-func dispatch(conn int64, msg message) {
+// a learns when the answer is posted.
+func dispatch(conn int64, msg message, a *answer) {
+	defer a.posted()
 	result, err := call(context.Background(), msg)
 	if _, ok := result.(stream); ok && err == nil {
 		err = fmt.Errorf("channel %q is a stream, subscribe to it", msg.Channel)
@@ -236,7 +253,7 @@ func dispatch(conn int64, msg message) {
 
 	answer := message{Type: typeResponse, ID: msg.ID}
 	if err == nil {
-		if answer.Data, err = encode(result); err != nil {
+		if answer.Data, answer.blobs, err = encodeData(result); err != nil {
 			err = fmt.Errorf("encode the result of %q: %w", msg.Channel, err)
 		}
 	}
@@ -244,13 +261,70 @@ func dispatch(conn int64, msg message) {
 		answer = message{Type: typeError, ID: msg.ID, Error: err.Error()}
 	}
 	// The answer to a Dart isolate that is gone is dropped.
-	if err := post(conn, answer); err != nil && !errors.Is(err, errReconnected) {
+	if _, err := post(conn, answer); err != nil && !errors.Is(err, errReconnected) {
 		log.Printf("fluffy: answer %q: %v", msg.Channel, err)
 	}
 }
 
+// The values of a stream Dart has not handled yet, Go waits before it
+// sends more.
+const (
+	maxUnacked      = 1024
+	maxUnackedBytes = 8 << 20
+)
+
 // subscription is one stream Dart listens to.
-type subscription struct{ cancel context.CancelFunc }
+type subscription struct {
+	cancel context.CancelFunc
+
+	mu           sync.Mutex
+	count, bytes int64         // sent but not handled by Dart yet
+	credit       chan struct{} // signals a credit from Dart
+}
+
+// sent counts a value of size bytes and waits while Dart is behind. It
+// returns false when ctx ends.
+func (s *subscription) sent(ctx context.Context, size int) bool {
+	s.mu.Lock()
+	s.count++
+	s.bytes += int64(size)
+	s.mu.Unlock()
+	for {
+		s.mu.Lock()
+		behind := s.count >= maxUnacked || s.bytes >= maxUnackedBytes
+		s.mu.Unlock()
+		if !behind {
+			return true
+		}
+		select {
+		case <-s.credit:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// credit counts the stream values Dart has handled.
+func credit(msg message) {
+	var handled [2]int64 // count, bytes
+	if err := json.Unmarshal(msg.Data, &handled); err != nil {
+		log.Printf("fluffy: invalid credit: %v", err)
+		return
+	}
+	v, ok := subscriptions.Load(msg.ID)
+	if !ok {
+		return
+	}
+	s := v.(*subscription)
+	s.mu.Lock()
+	s.count -= handled[0]
+	s.bytes -= handled[1]
+	s.mu.Unlock()
+	select {
+	case s.credit <- struct{}{}:
+	default:
+	}
+}
 
 // Dart numbers subscriptions from 1 again after a hot restart, so the
 // entry is compared too, not just the id.
@@ -258,23 +332,24 @@ var subscriptions sync.Map // subscription id -> *subscription
 
 // subscribe starts a stream handler for the connection conn. The
 // subscription is stored before the handler runs, so a cancel right after
-// the subscribe is not lost.
-func subscribe(conn int64, msg message) {
+// the subscribe is not lost. a learns when the first message is posted.
+func subscribe(conn int64, msg message, a *answer) {
 	ctx, cancel := context.WithCancel(context.Background())
-	sub := &subscription{cancel}
+	sub := &subscription{cancel: cancel, credit: make(chan struct{}, 1)}
 	subscriptions.Store(msg.ID, sub)
 	go func() {
 		defer func() {
 			subscriptions.CompareAndDelete(msg.ID, sub)
 			cancel()
+			a.posted()
 		}()
-		serve(ctx, conn, msg)
+		serve(ctx, conn, msg, sub, a)
 	}()
 }
 
 // serve sends the values of a stream to Dart until the stream ends or Dart
 // cancels it. Messages for a Dart isolate that is gone are dropped.
-func serve(ctx context.Context, conn int64, msg message) {
+func serve(ctx context.Context, conn int64, msg message, sub *subscription, a *answer) {
 	fail := func(err error) {
 		post(conn, message{Type: typeError, ID: msg.ID, Error: err.Error()})
 	}
@@ -293,12 +368,16 @@ func serve(ctx context.Context, conn int64, msg message) {
 		if !ok {
 			break
 		}
-		data, err := encode(value)
+		data, blobs, err := encodeData(value)
 		if err != nil {
 			fail(fmt.Errorf("encode %q: %w", msg.Channel, err))
 			return
 		}
-		post(conn, message{Type: typeNext, ID: msg.ID, Data: data})
+		size, err := post(conn, message{Type: typeNext, ID: msg.ID, Data: data, blobs: blobs})
+		a.posted()
+		if err == nil && !sub.sent(ctx, size) {
+			break
+		}
 	}
 	if ctx.Err() == nil {
 		post(conn, message{Type: typeDone, ID: msg.ID})
@@ -333,12 +412,5 @@ func call(ctx context.Context, msg message) (result any, err error) {
 			err = fmt.Errorf("Go handler %q panicked: %v", msg.Channel, r)
 		}
 	}()
-	return h.(handler)(ctx, msg.Data)
-}
-
-func panicError(r any) error {
-	if err, ok := r.(error); ok {
-		return fmt.Errorf("panic: %w", err)
-	}
-	return fmt.Errorf("panic: %v", r)
+	return h.(handler)(ctx, msg.Data, msg.blobs)
 }

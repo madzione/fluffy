@@ -2,7 +2,6 @@ package fluffy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -34,11 +33,11 @@ type waiter struct {
 // without waiting for an answer. data is encoded as JSON. Messages emitted
 // before Dart connects are queued, up to a limit.
 func Emit(channel string, data any) error {
-	raw, err := encode(data)
+	raw, blobs, err := encodeData(data)
 	if err != nil {
 		return fmt.Errorf("fluffy: encode %q: %w", channel, err)
 	}
-	if err := post(0, message{Type: typeEmit, Channel: channel, Data: raw}); err != nil {
+	if _, err := post(0, message{Type: typeEmit, Channel: channel, Data: raw, blobs: blobs}); err != nil {
 		return fmt.Errorf("fluffy: emit %q: %w", channel, err)
 	}
 	return nil
@@ -50,7 +49,7 @@ func Emit(channel string, data any) error {
 // restart) before it has answered.
 func Request[R any](ctx context.Context, channel string, data any) (R, error) {
 	var result R
-	raw, err := encode(data)
+	raw, blobs, err := encodeData(data)
 	if err != nil {
 		return result, fmt.Errorf("fluffy: encode %q: %w", channel, err)
 	}
@@ -60,7 +59,7 @@ func Request[R any](ctx context.Context, channel string, data any) (R, error) {
 	pending.Store(id, w)
 	defer pending.Delete(id)
 
-	if err := post(w.conn, message{Type: typeRequest, ID: id, Channel: channel, Data: raw}); err != nil {
+	if _, err := post(w.conn, message{Type: typeRequest, ID: id, Channel: channel, Data: raw, blobs: blobs}); err != nil {
 		return result, fmt.Errorf("fluffy: request %q: %w", channel, err)
 	}
 	select {
@@ -71,7 +70,7 @@ func Request[R any](ctx context.Context, channel string, data any) (R, error) {
 		case typeReconnect:
 			return result, fmt.Errorf("fluffy: request %q: %w", channel, errReconnected)
 		}
-		if err := decode(msg.Data, &result); err != nil {
+		if err := decode(msg.Data, msg.blobs, &result); err != nil {
 			return result, fmt.Errorf("fluffy: decode answer of %q: %w", channel, err)
 		}
 		return result, nil
@@ -97,23 +96,4 @@ func failPending(conn int64) {
 		}
 		return true
 	})
-}
-
-// encode is json.Marshal that turns a panic of a MarshalJSON or MarshalText
-// method into an error.
-func encode(v any) (data json.RawMessage, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = panicError(r)
-		}
-	}()
-	return json.Marshal(v)
-}
-
-// decode is json.Unmarshal that treats missing data as null.
-func decode(data json.RawMessage, v any) error {
-	if len(data) == 0 {
-		data = json.RawMessage("null")
-	}
-	return json.Unmarshal(data, v)
 }

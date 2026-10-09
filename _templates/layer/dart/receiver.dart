@@ -6,7 +6,9 @@ typedef Handler = FutureOr<Object?> Function(Object? data);
 /// Produces the values of a stream for a subscription.
 typedef StreamHandler = Stream<Object?> Function(Object? data);
 
-/// Receives messages from Go.
+/// Receives messages from Go. The data is decoded JSON, except a Go []byte
+/// sent as the data itself or as a field of a struct sent as the data,
+/// which arrives as a Uint8List instead of a base64 String.
 class Receiver {
   Receiver._();
 

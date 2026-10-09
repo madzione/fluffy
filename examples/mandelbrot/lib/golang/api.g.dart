@@ -39,11 +39,11 @@ class GoBench {
 
   /// Bytes sends n bytes to Dart.
   Future<Uint8List> bytes(int n) async =>
-      switch (await emitter.request<Object?>('bench.Bytes', [n])) { final String v0 => base64Decode(v0), _ => Uint8List(0) };
+      switch (await emitter.request<Object?>('bench.Bytes', [n])) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) };
 
   /// Chunks streams n chunks of size bytes.
   Stream<Uint8List> chunks(int n, int size) =>
-      emitter.subscribe('bench.Chunks', [n, size]).map((x0) => switch (x0) { final String v1 => base64Decode(v1), _ => Uint8List(0) });
+      emitter.subscribe('bench.Chunks', [n, size]).map((x0) => switch (x0) { final Uint8List v1 => v1, final String v1 => base64Decode(v1), _ => Uint8List(0) });
 
   /// Now is the wall clock in microseconds, to split a round trip into its
   /// two directions.
@@ -56,7 +56,7 @@ class GoBench {
 
   /// Take receives b from Dart and returns its length.
   Future<int> take(Uint8List b) async =>
-      (await emitter.request<Object?>('bench.Take', [base64Encode(b)])) as int;
+      (await emitter.request<Object?>('bench.Take', [b])) as int;
 
   /// Values streams the numbers 0 to n-1.
   Stream<int> values(int n) =>
@@ -168,7 +168,7 @@ class Tile {
     return Tile(
       y: m['y'] as int,
       height: m['height'] as int,
-      pixels: switch (m['pixels']) { final String v0 => base64Decode(v0), _ => Uint8List(0) },
+      pixels: switch (m['pixels']) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) },
       done: m['done'] as int,
       total: m['total'] as int,
       micros: m['micros'] as int,

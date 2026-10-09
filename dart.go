@@ -26,6 +26,7 @@ type dartType struct {
 	decode  func(e string, d int) string // JSON value -> name
 	encode  func(e string, d int) string // name -> JSON value, nil when it is one already
 	nonNull *dartType                    // the type without ?, set by nullable
+	bytes   bool                         // Uint8List, sent as raw bytes as a whole message's value
 }
 
 func castType(name string) *dartType {
@@ -38,6 +39,18 @@ func castType(name string) *dartType {
 }
 
 var objectType = &dartType{name: "Object?", decode: func(e string, _ int) string { return e }}
+
+// raw returns how t is sent as an argument, a result or the data of a
+// message: a Uint8List as is, the message layer sends it as raw bytes. In
+// a struct field or a list it is base64 like in encoding/json.
+func (t *dartType) raw() *dartType {
+	if t == nil || !(t.bytes || t.nonNull != nil && t.nonNull.bytes) {
+		return t
+	}
+	raw := *t
+	raw.encode = nil
+	return &raw
+}
 
 func (t *dartType) enc(e string, d int) string {
 	if t.encode == nil {
@@ -293,10 +306,13 @@ func (g *dartGen) mapType(t types.Type, addr bool) (*dartType, error) {
 		if isByte(u.Elem()) {
 			g.imports["dart:convert"], g.imports["dart:typed_data"] = true, true
 			return &dartType{
-				name: "Uint8List",
+				name:  "Uint8List",
+				bytes: true,
+				// Raw bytes as a message's value or a field of it, base64
+				// elsewhere.
 				decode: func(e string, d int) string {
 					v := fmt.Sprintf("v%d", d)
-					return fmt.Sprintf("switch %s { final String %s => base64Decode(%s), _ => Uint8List(0) }", parens(e), v, v)
+					return fmt.Sprintf("switch %s { final Uint8List %s => %s, final String %s => base64Decode(%s), _ => Uint8List(0) }", parens(e), v, v, v, v)
 				},
 				encode: func(e string, _ int) string { return "base64Encode(" + e + ")" },
 			}, nil
@@ -910,7 +926,7 @@ func (g *dartGen) endpoint(ep *endpoint, name string) (string, error) {
 		var decl, args []string
 		for i, n := range names {
 			decl = append(decl, types[i].name+" "+n)
-			args = append(args, types[i].enc(n, 0))
+			args = append(args, types[i].raw().enc(n, 0))
 		}
 		call := fmt.Sprintf("%s, [%s]", channel, strings.Join(args, ", "))
 		switch {
@@ -933,7 +949,7 @@ func (g *dartGen) endpoint(ep *endpoint, name string) (string, error) {
 			return "", fmt.Errorf("data: %w", err)
 		}
 		n := dartIdent(lowerCamel(ep.argName()), dartShadowed...)
-		decl, data = t.name+" "+n, ", "+t.enc(n, 0)
+		decl, data = t.name+" "+n, ", "+t.raw().enc(n, 0)
 	}
 	if ep.kind == kindOn {
 		fmt.Fprintf(&b, "void %s(%s) => emitter.emit(%s%s);\n", name, decl, channel, data)
@@ -988,6 +1004,7 @@ func (g *dartGen) inbound(in *inbound, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	result = result.raw()
 	g.imports["dart:async"] = true
 	fn, arg := "FutureOr<void> Function(", "handler()"
 	if data != nil {
@@ -1044,6 +1061,7 @@ func (g *dartGen) iface(d *dartIface) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", m.name, err)
 		}
+		result = result.raw()
 		var decl, args []string
 		for i, n := range names {
 			decl = append(decl, types[i].name+" "+n)

@@ -243,7 +243,7 @@ A function can have:
 
 - **Parameters:** an optional `context.Context` first, then any number of arguments. Variadic functions aren't supported.
 - **Results:** nothing, `R`, `error` or `(R, error)`. An error fails the Dart future with a `GolangException`, nothing or only `error` gives a `Future<void>`.
-- **A channel result** (`<-chan T`, optionally with an `error`): the Dart function returns a `Stream<T>`. Go calls the function when Dart starts listening and sends every value until the channel is closed. When Dart cancels the subscription, the function's `ctx` is cancelled, so the goroutine can stop. Close the channel when you stop, also on `ctx.Done()`. Values sent after the cancel are drained, so a sender that ignores `ctx` doesn't block forever, but only until the channel is closed or idle for 5 seconds. There is no backpressure: Go sends as fast as the channel delivers, and Dart buffers what a paused or slow listener hasn't handled yet, so pace fast producers yourself.
+- **A channel result** (`<-chan T`, optionally with an `error`): the Dart function returns a `Stream<T>`. Go calls the function when Dart starts listening and sends every value until the channel is closed. When Dart cancels the subscription, the function's `ctx` is cancelled, so the goroutine can stop. Close the channel when you stop, also on `ctx.Done()`. Values sent after the cancel are drained, so a sender that ignores `ctx` doesn't block forever, but only until the channel is closed or idle for 5 seconds. Streams have backpressure: Go sends ahead of Dart, but stops receiving from the channel while 1024 values or 8 MiB have not reached the Dart listener, e.g. while the subscription is paused.
 
 The `ctx` of other functions is never cancelled. Go doc comments become Dart doc comments.
 
@@ -332,7 +332,7 @@ The interface can live in your app's package too, so it stays testable without F
 | `int*`, `uint*` | `int` (on the web, values above 2⁵³ lose precision) |
 | `float*` | `double` |
 | `string`, `bool` | `String`, `bool` |
-| `[]byte` | `Uint8List` (base64 on the wire, converted for you) |
+| `[]byte` | `Uint8List` (raw bytes on the wire as an argument, result or struct field of one, base64 deeper down) |
 | `[]T`, `[N]T` | `List<T>` (a `nil` slice arrives as an empty list) |
 | `map[string]T`, `map[int]T` | `Map<String, T>`, `Map<int, T>` |
 | `*T`, fields with `omitempty` (except structs) or `omitzero` | `T?` |
@@ -435,7 +435,7 @@ try {
 
 ### Bytes and images
 
-`encoding/json` sends a `[]byte` as a base64 string. Return the bytes from the handler, here a PNG embedded in the Go library. The request carries no data, so the handler takes an empty `struct{}`:
+A `[]byte` travels as raw bytes next to the JSON message, without base64: as an argument, a result, a stream value or the data of `Emit`/`Request`/`Handle`, and as a field of a struct sent that way. Deeper down, e.g. in a slice of structs, it is base64 like `encoding/json` writes it. Return the bytes from the handler, here a PNG embedded in the Go library. The request carries no data, so the handler takes an empty `struct{}`:
 
 ```go
 //go:embed gopher.png
@@ -448,10 +448,10 @@ func init() {
 }
 ```
 
-The generated `Future<Uint8List> gopher()` decodes the base64 string back into bytes. By hand, that is:
+The generated `Future<Uint8List> gopher()` returns the bytes. By hand, that is:
 
 ```dart
-final bytes = base64Decode(await emitter.request<String>('gopher'));
+final bytes = await emitter.request<Uint8List>('gopher');
 ```
 
 The bytes work with anything that takes a `Uint8List`, e.g. as an image:
@@ -463,9 +463,9 @@ setState(() => _image = MemoryImage(bytes));
 Image(image: _image, gaplessPlayback: true)
 ```
 
-Bytes from Dart to Go work the same way: send `base64Encode(bytes)` and take a `[]byte` in the Go handler, which `encoding/json` decodes from base64.
+Bytes from Dart to Go work the same way: send a `Uint8List` as the data, as an element of a `List` data (an argument) or as a value of a `Map` there (a struct field), and take a `[]byte` in the Go handler. A base64 string works as well, `encoding/json` decodes it.
 
-The answer is a copy, so there is no C memory to free on the Dart side. Base64 makes the message about a third larger, which is fine for images and files, but not for large data sent many times per second.
+Go copies the bytes when it sends them, so the slice can change afterwards. On native platforms large byte data from Go is a view of the buffer the messages arrived in, which is freed once nothing refers to it.
 
 ### Go sends events to Dart
 
@@ -528,7 +528,7 @@ ok, err := fluffy.Request[bool](ctx, "confirm", "Delete all files?")
 
 ### Testing
 
-**Dart:** widget tests run without the Go library. `Bridge.fake()` connects the app to an in-memory bridge that plays the Go side. Exported functions and bound methods get their arguments as a list, streams are served with `receiver.stream`:
+**Dart:** widget tests run without the Go library. `Bridge.fake()` connects the app to an in-memory bridge that plays the Go side. Exported functions and bound methods get their arguments as a list (a `Uint8List` argument stays a `Uint8List`), streams are served with `receiver.stream`:
 
 ```dart
 final go = golang.Bridge.fake();
@@ -550,18 +550,23 @@ Every message is a JSON object:
 {"type": "response", "id": 1, "data": 5}
 ```
 
-- `type` is `emit`, `request`, `response` or `error`, and for streams `subscribe`, `next`, `done` and `cancel`.
+- `type` is `emit`, `request`, `response` or `error`, and for streams `subscribe`, `next`, `done`, `cancel` and `credit`.
 - An answer reuses the `id` of its request, and an `error` answer carries the message in `error`.
 - Exported functions and bound methods take their arguments as a JSON array, channels registered with `Handle` and `On` take a single value.
-- A stream starts with Dart's `subscribe`. Go answers with a `next` per value and a final `done` or `error`, all with the `id` of the subscription. Dart's `cancel` ends it early.
+- A stream starts with Dart's `subscribe`. Go answers with a `next` per value and a final `done` or `error`, all with the `id` of the subscription. Dart's `cancel` ends it early. Dart acknowledges the values its listener got with `credit` (`data` is `[count, bytes]`), and Go waits while 1024 values or 8 MiB are not acknowledged.
+- Byte data travels after the JSON as blobs. `bin` lists where each belongs in `data`, e.g. `"bin": [[0]]` for the first argument or `[["pixels"]]` for a struct field; the JSON has `null` there.
 - A hot restart starts a new Dart isolate that connects again and numbers its requests and streams from 1 again. Go then ends everything of the old connection: it cancels its streams, drops late answers to its requests (they would reach the new isolate under a reused `id`) and fails its own pending requests to the old isolate.
+
+On the wire a message is a frame: the length of the JSON and the number of blobs (little-endian `uint32` each), the JSON, then each blob with its length.
 
 | | Dart → Go | Go → Dart |
 |---|---|---|
-| Native (`dart:ffi`) | `FluffySend(bytes, length)`. Go copies the message before returning. | Go calls a `NativeCallable.listener` registered with `FluffyConnect`. It passes a `malloc`ed copy, which Dart frees with `FluffyFree` after decoding. |
-| Web (WebAssembly) | `globalThis.golang.send(message)` | A callback registered with `globalThis.golang.connect` |
+| Native (`dart:ffi`) | Dart writes the frame into a buffer from `FluffyAlloc` and passes it to `FluffySend`, Go frees it. For a request or subscribe, Go waits up to 250 µs for the first answer and then tells Dart to take it right away. | Go collects messages in an outbox and rings a `NativeCallable.listener` registered with `FluffyConnect` once. Dart takes all of them with `FluffyTake` in one `malloc`ed buffer, freed by a finalizer. |
+| Web (WebAssembly) | `globalThis.golang.send(frame)` | Go calls the first callback registered with `globalThis.golang.connect` with a message, more messages of the same run of Go wait for `golang.take`, announced by the second callback. |
 
-On the web, `fluffy.Serve` sets `globalThis.golang` and then calls `globalThis.fluffyReady`. The loader in `web/index.html` waits for that before it starts Flutter, and shows an error in the page when `golang.wasm` fails to load or Go exits first.
+Why: a message from Go waits for the next turn of Dart's event loop, about 1 ms on desktop Linux. An answer that is ready within the 250 µs skips that wait, so a call takes about 25 µs instead of 1.1 ms. Channels that miss the 250 µs stop waiting until they answer in time again. Batching the messages to Dart makes streams over ten times faster, and raw bytes avoid base64 on both sides.
+
+On the web, `fluffy.Serve` sets `globalThis.golang` and then calls `globalThis.fluffyReady`. The loader in `web/index.html` waits for that before it starts Flutter, and shows an error in the page when `golang.wasm` fails to load or Go exits first. Go runs on the browser's main thread there and only returns to it when all goroutines are blocked: call `fluffy.Yield()` regularly in long computations (it does nothing natively).
 
 ## CLI reference
 

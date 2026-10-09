@@ -148,7 +148,7 @@ func Clock(ctx context.Context) <-chan string {
 }
 ```
 
-Go runs the function when Dart starts listening; cancelling the Dart subscription cancels `ctx`. Always close the channel, also on `ctx.Done()`. There is no backpressure: Dart buffers whatever a slow listener hasn't handled, so throttle or coalesce fast producers in Go. The `ctx` of non-stream functions is never cancelled.
+Go runs the function when Dart starts listening; cancelling the Dart subscription cancels `ctx`. Always close the channel, also on `ctx.Done()`. Streams have backpressure: Go stops receiving from the channel while 1024 values or 8 MiB haven't reached the Dart listener (e.g. a paused subscription), so a fast producer simply blocks on its send. The `ctx` of non-stream functions is never cancelled.
 
 ### Go calling Dart: `//fluffy:dart`
 
@@ -186,7 +186,7 @@ golang.UI.register(AppUI());
 | `int*`, `uint*` | `int` (web: precision lost above 2^53) |
 | `float*` | `double` |
 | `string`, `bool` | `String`, `bool` |
-| `[]byte` | `Uint8List` (base64 on the wire) |
+| `[]byte` | `Uint8List` (raw bytes on the wire as an argument, result, stream value or a struct field of one; base64 deeper down) |
 | `[]T`, `[N]T` | `List<T>` (nil arrives as empty list) |
 | `map[string]T`, `map[int]T` | `Map<String,T>`, `Map<int,T>` (nil arrives as empty map) |
 | `*T`, fields with `omitempty` (non-struct) or `omitzero` | `T?` |
@@ -204,7 +204,7 @@ Give `MarshalText`/`MarshalJSON` value receivers: with a pointer receiver `encod
 ## Gotchas
 
 - **The generator sees the web build.** It type-checks as `GOOS=js GOARCH=wasm`, so files excluded from js (`//go:build !js`, `_windows.go`, cgo-only code, …) are invisible to it, and it warns if they use the fluffy API. Keep every exported function, bound service and `//fluffy:dart` interface in files that build for js/wasm, and split only the platform-specific internals, e.g. `store.go` (`//go:build !js`, files on disk) next to `store_js.go` (localStorage via `syscall/js`) with the same functions. The Go code must compile for both native and `js/wasm`; check with `GOOS=js GOARCH=wasm go vet ./...` in `golang/`.
-- **Long computations on the web freeze the app.** Go wasm runs on the browser's main thread and only yields when every goroutine is blocked. In a hot loop, call something like `time.Sleep(time.Millisecond)` periodically in a `_js.go` file (a no-op in the native counterpart), and stream partial results.
+- **Long computations on the web freeze the app.** Go wasm runs on the browser's main thread and only yields when every goroutine is blocked. In a hot loop, call `fluffy.Yield()` periodically (about 0.05 ms on the web, a no-op natively) and stream partial results. Avoid `time.Sleep` for this: browsers stretch it to 4 ms or more per call.
 - **Hot restart** reconnects Dart: Go cancels the old streams and fails its pending requests to the old isolate, but keeps its state and does not run `Start` again.
 - **Generator errors** mean the runtime would misbehave: a channel registered twice, a channel used with different types, two things mapping to the same Dart name, unsupported types. Fix the Go code; don't work around it in generated files.
 - If a native build fails because `fluffy_api.go` registers a function that was removed or renamed, the hook rewrites it and retries; still run `fluffy generate` for the Dart side.

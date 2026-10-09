@@ -81,13 +81,20 @@ Future<String> invalidUTF8() async =>
 
 /// AllBytes is every byte value once.
 Future<Uint8List> allBytes() async =>
-    switch (await emitter.request<Object?>('AllBytes', [])) { final String v0 => base64Decode(v0), _ => Uint8List(0) };
+    switch (await emitter.request<Object?>('AllBytes', [])) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) };
 
 Future<BytesInfo> describeBytes(Uint8List b) async =>
-    BytesInfo.fromJson(await emitter.request<Object?>('DescribeBytes', [base64Encode(b)]));
+    BytesInfo.fromJson(await emitter.request<Object?>('DescribeBytes', [b]));
 
 Future<Uint8List> echoBytes(Uint8List b) async =>
-    switch (await emitter.request<Object?>('EchoBytes', [base64Encode(b)])) { final String v0 => base64Decode(v0), _ => Uint8List(0) };
+    switch (await emitter.request<Object?>('EchoBytes', [b])) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) };
+
+Future<Photo> echoPhoto(Photo p) async =>
+    Photo.fromJson(await emitter.request<Object?>('EchoPhoto', [p.toJson()]));
+
+/// Photos streams n photos, photo i has i+1 bytes of data.
+Stream<Photo?> photos(int n) =>
+    emitter.subscribe('Photos', [n]).map((x0) => switch (x0) { final v1? => Photo.fromJson(v1), _ => null });
 
 /// Repeat returns s n times.
 Future<String> repeat(String s, int n) async =>
@@ -161,6 +168,14 @@ Stream<int> empty() =>
 /// Ticks sends a number every 10ms until Dart cancels it.
 Stream<int> ticks() =>
     emitter.subscribe('Ticks', []).map((x0) => x0 as int);
+
+/// Flood sends numbers as fast as the stream takes them and counts them in
+/// Flooded.
+Stream<int> flood() =>
+    emitter.subscribe('Flood', []).map((x0) => x0 as int);
+
+Future<int> flooded() async =>
+    (await emitter.request<Object?>('Flooded', [])) as int;
 
 Future<StreamStats> stats() async =>
     StreamStats.fromJson(await emitter.request<Object?>('Stats', []));
@@ -279,7 +294,7 @@ class Everything {
       color: m['color'] as String,
       level: m['level'] as String,
       point: m['point'],
-      bytes: switch (m['bytes']) { final String v0 => base64Decode(v0), _ => Uint8List(0) },
+      bytes: switch (m['bytes']) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) },
       time: DateTime.parse(m['time'] as String),
       duration: Duration(microseconds: (m['duration'] as int) ~/ 1000),
       addr: m['addr'] as String,
@@ -479,7 +494,7 @@ class Lists {
       nilSlice: (m['nilSlice'] as List<dynamic>?)?.map((x0) => x0 as String).toList() ?? const <String>[],
       emptySlice: (m['emptySlice'] as List<dynamic>?)?.map((x0) => x0 as String).toList() ?? const <String>[],
       nilMap: (m['nilMap'] as Map<String, dynamic>?)?.map((k0, x0) => MapEntry(k0, x0 as int)) ?? const <String, int>{},
-      nilBytes: switch (m['nilBytes']) { final String v0 => base64Decode(v0), _ => Uint8List(0) },
+      nilBytes: switch (m['nilBytes']) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) },
     );
   }
 
@@ -576,6 +591,45 @@ class BytesInfo {
 
   @override
   String toString() => 'BytesInfo(len: $len, sum: $sum, first: $first, last: $last)';
+}
+
+/// Photo has byte fields. Sent as a whole value, its byte slices travel as
+/// raw bytes next to the JSON, deeper ones (Pages) as base64.
+class Photo {
+  const Photo({
+    required this.name,
+    required this.data,
+    this.thumbnail,
+    required this.pages,
+  });
+
+  factory Photo.fromJson(Object? json) {
+    final m = json as Map<String, dynamic>;
+    return Photo(
+      name: m['name'] as String,
+      data: switch (m['data']) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) },
+      thumbnail: switch (m['thumbnail']) { final v0? => switch (v0) { final Uint8List v1 => v1, final String v1 => base64Decode(v1), _ => Uint8List(0) }, _ => null },
+      pages: (m['pages'] as List<dynamic>?)?.map((x0) => switch (x0) { final Uint8List v1 => v1, final String v1 => base64Decode(v1), _ => Uint8List(0) }).toList() ?? const <Uint8List>[],
+    );
+  }
+
+  final String name;
+
+  final Uint8List data;
+
+  final Uint8List? thumbnail;
+
+  final List<Uint8List> pages;
+
+  Map<String, Object?> toJson() => {
+    'name': name,
+    'data': base64Encode(data),
+    if (thumbnail case final v0?) 'thumbnail': base64Encode(v0),
+    'pages': [for (final x0 in pages) base64Encode(x0)],
+  };
+
+  @override
+  String toString() => 'Photo(name: $name, data: $data, thumbnail: $thumbnail, pages: $pages)';
 }
 
 /// StreamStats counts the Ticks streams.

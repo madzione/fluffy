@@ -6,40 +6,84 @@ package fluffy
 #include <stdint.h>
 #include <stdlib.h>
 
-typedef void (*fluffy_callback)(uint8_t* data, int64_t length);
+typedef void (*fluffy_ring)(void);
 
 // Go cannot call a C function pointer directly.
-static void fluffy_call(fluffy_callback callback, uint8_t* data, int64_t length) {
-	callback(data, length);
+static void fluffy_call(fluffy_ring ring) {
+	ring();
+}
+
+// The free that matches C.malloc, for Dart's finalizers.
+static void* fluffy_free(void) {
+	return (void*)&free;
 }
 */
 import "C"
 import "unsafe"
 
-// The native transport. Dart sends with FluffySend and passes a
-// NativeCallable.listener to FluffyConnect, which Go calls from any thread
-// with a malloc'ed copy of each message. Dart copies it and releases it with
-// FluffyFree.
+// The native transport. Dart passes a NativeCallable.listener to
+// FluffyConnect, the doorbell: Go calls it from any thread when the outbox
+// gets messages, and Dart takes all of them at once with FluffyTake, in a
+// malloc'ed buffer it frees with a finalizer. Dart sends each message with
+// FluffySend in a buffer from FluffyAlloc, which Go frees.
 
 //export FluffyConnect
-func FluffyConnect(callback C.fluffy_callback) {
-	connect(func(msg []byte) {
-		C.fluffy_call(callback, (*C.uint8_t)(C.CBytes(msg)), C.int64_t(len(msg)))
-	})
+func FluffyConnect(ring C.fluffy_ring) {
+	connect(func() { C.fluffy_call(ring) })
 }
 
-// FluffySend copies the message, Dart keeps ownership of data.
+// FluffyAlloc returns a buffer of length bytes for FluffySend.
+//
+//export FluffyAlloc
+func FluffyAlloc(length C.int64_t) unsafe.Pointer {
+	return C.malloc(C.size_t(length))
+}
+
+// FluffySend hands one frame to Go, which frees data. It returns 1 when Dart
+// has to call FluffyTake right away: Go waits briefly for the answer to a
+// request or the first value of a subscription and returns it that way,
+// without the doorbell.
 //
 //export FluffySend
-func FluffySend(data *C.uint8_t, length C.int64_t) {
-	deliver(C.GoBytes(unsafe.Pointer(data), C.int(length)))
+func FluffySend(data unsafe.Pointer, length C.int64_t) C.int32_t {
+	raw := unsafe.Slice((*byte)(data), int(length))
+	if await(deliver(raw, func() { C.free(data) })) {
+		return 1
+	}
+	return 0
 }
 
-//export FluffyFree
-func FluffyFree(data unsafe.Pointer) {
-	C.free(data)
+// FluffyTake returns the outbox in one malloc'ed buffer and its length, or
+// NULL when it is empty.
+//
+//export FluffyTake
+func FluffyTake(length *C.int64_t) unsafe.Pointer {
+	segments, size := take()
+	*length = C.int64_t(size)
+	if size == 0 {
+		return nil
+	}
+	p := C.malloc(C.size_t(size))
+	buf := unsafe.Slice((*byte)(p), size)
+	n := 0
+	for _, s := range segments {
+		n += copy(buf[n:], s)
+	}
+	return p
+}
+
+// FluffyFreeFunction returns the address of free, the finalizer of the
+// buffers from FluffyTake.
+//
+//export FluffyFreeFunction
+func FluffyFreeFunction() unsafe.Pointer {
+	return C.fluffy_free()
 }
 
 // Serve is only needed on the web. Native builds are libraries, their main
 // function never runs.
 func Serve() {}
+
+// Yield lets the browser run on the web, where Go shares its main thread.
+// Natively Go has threads of its own, it does nothing.
+func Yield() {}

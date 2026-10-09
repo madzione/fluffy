@@ -1,7 +1,9 @@
 package fluffy
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,30 +18,113 @@ import (
 func fakeDart(t *testing.T) <-chan message {
 	t.Helper()
 	received := make(chan message, 64)
-	connect(func(raw []byte) {
-		var msg message
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			t.Errorf("invalid message %s: %v", raw, err)
-		}
-		// Like the real transports, never block Go: post holds the
-		// transport lock. Messages nobody reads, e.g. of an endless stream,
-		// are dropped.
+	connectDart(t, func(msg message) {
+		// Messages nobody reads, e.g. of an endless stream, are dropped.
 		select {
 		case received <- msg:
 		default:
 		}
 	})
+	return received
+}
+
+// connectDart connects a Dart that takes the outbox when Go rings and calls
+// handle with each message, in a goroutine of its own like Dart's event
+// loop.
+func connectDart(t *testing.T, handle func(message)) {
+	t.Helper()
+	rings := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	connect(func() {
+		select {
+		case rings <- struct{}{}:
+		default:
+		}
+	})
+	go func() {
+		for {
+			select {
+			case <-rings:
+			case <-stop:
+				return
+			}
+			for _, msg := range takeMessages(t) {
+				handle(msg)
+			}
+		}
+	}()
 	// Late messages of a test, e.g. stream values sent before a cancel,
 	// are dropped instead of queued for the next test.
-	t.Cleanup(func() { connect(func([]byte) {}) })
-	return received
+	t.Cleanup(func() {
+		close(stop)
+		connect(func() {})
+	})
+}
+
+// takeMessages takes the outbox and decodes its frames.
+func takeMessages(t *testing.T) []message {
+	segments, _ := take()
+	var raw []byte
+	for _, s := range segments {
+		raw = append(raw, s...)
+	}
+	var msgs []message
+	for len(raw) > 0 {
+		msg, rest, err := readFrame(raw)
+		if err != nil {
+			t.Errorf("invalid frame: %v", err)
+			return msgs
+		}
+		msgs = append(msgs, msg)
+		raw = rest
+	}
+	return msgs
 }
 
 func disconnect() {
 	out.Lock()
 	defer out.Unlock()
-	out.send = nil
-	out.queued = nil
+	out.ring, out.push = nil, nil
+	out.segments, out.size, out.queued = nil, 0, 0
+}
+
+// frameOf builds the frame Dart sends for the JSON envelope s and the
+// blobs, s has their paths in bin already.
+func frameOf(s string, blobs ...[]byte) []byte {
+	raw := binary.LittleEndian.AppendUint32(nil, uint32(len(s)))
+	raw = binary.LittleEndian.AppendUint32(raw, uint32(len(blobs)))
+	raw = append(raw, s...)
+	for _, b := range blobs {
+		raw = binary.LittleEndian.AppendUint32(raw, uint32(len(b)))
+		raw = append(raw, b...)
+	}
+	return raw
+}
+
+// send delivers the JSON envelope s from Dart.
+func send(s string, blobs ...[]byte) *answer {
+	return deliver(frameOf(s, blobs...), nil)
+}
+
+// answerTo replies to every request from Go with answer.
+func answerTo(t *testing.T, answer func(message) message) {
+	connectDart(t, func(msg message) {
+		if msg.Type == typeRequest {
+			reply := answer(msg)
+			reply.ID = msg.ID
+			go deliverMessage(reply)
+		}
+	})
+}
+
+// deliverMessage delivers msg from Dart.
+func deliverMessage(msg message) {
+	segments, _ := msg.frame()
+	var raw []byte
+	for _, s := range segments {
+		raw = append(raw, s...)
+	}
+	deliver(raw, nil)
 }
 
 func next(t *testing.T, received <-chan message) message {
@@ -59,13 +144,13 @@ func TestHandleAnswersRequests(t *testing.T) {
 	Handle("fail", func(struct{}) (int, error) { return 0, errors.New("broken") })
 	Handle("panic", func(struct{}) (int, error) { panic("boom") })
 
-	deliver([]byte(`{"type":"request","id":1,"channel":"sum","data":{"a":2,"b":3}}`))
+	send(`{"type":"request","id":1,"channel":"sum","data":{"a":2,"b":3}}`)
 	if msg := next(t, received); msg.Type != typeResponse || msg.ID != 1 || string(msg.Data) != "5" {
 		t.Errorf("sum: %+v", msg)
 	}
 
 	for _, channel := range []string{"fail", "panic", "missing"} {
-		deliver([]byte(`{"type":"request","id":2,"channel":"` + channel + `"}`))
+		send(`{"type":"request","id":2,"channel":"` + channel + `"}`)
 		if msg := next(t, received); msg.Type != typeError || msg.ID != 2 || msg.Error == "" {
 			t.Errorf("%s: %+v", channel, msg)
 		}
@@ -75,7 +160,7 @@ func TestHandleAnswersRequests(t *testing.T) {
 func TestOnReceivesEmits(t *testing.T) {
 	got := make(chan string, 1)
 	On("log", func(text string) { got <- text })
-	deliver([]byte(`{"type":"emit","channel":"log","data":"hi"}`))
+	send(`{"type":"emit","channel":"log","data":"hi"}`)
 	select {
 	case text := <-got:
 		if text != "hi" {
@@ -99,17 +184,12 @@ func TestEmitQueuesUntilConnected(t *testing.T) {
 
 func TestRequestWaitsForDart(t *testing.T) {
 	// Dart answers the first request and fails the second.
-	connect(func(raw []byte) {
-		var msg message
-		json.Unmarshal(raw, &msg)
-		answer := message{Type: typeResponse, ID: msg.ID, Data: json.RawMessage(`"yes"`)}
+	answerTo(t, func(msg message) message {
 		if msg.ID%2 == 0 {
-			answer = message{Type: typeError, ID: msg.ID, Error: "no"}
+			return message{Type: typeError, Error: "no"}
 		}
-		reply, _ := json.Marshal(answer)
-		go deliver(reply)
+		return message{Type: typeResponse, Data: json.RawMessage(`"yes"`)}
 	})
-	t.Cleanup(disconnect)
 	lastID.Store(0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -140,7 +220,7 @@ type adder interface{ Add(a, b int) int }
 
 func request(t *testing.T, received <-chan message, id int64, channel, data string) message {
 	t.Helper()
-	deliver([]byte(fmt.Sprintf(`{"type":"request","id":%d,"channel":%q,"data":%s}`, id, channel, data)))
+	send(fmt.Sprintf(`{"type":"request","id":%d,"channel":%q,"data":%s}`, id, channel, data))
 	msg := next(t, received)
 	if msg.ID != id {
 		t.Fatalf("answer for id %d, want %d", msg.ID, id)
@@ -215,7 +295,7 @@ func TestStream(t *testing.T) {
 		return ch, nil
 	})
 
-	deliver([]byte(`{"type":"subscribe","id":1,"channel":"count","data":[2]}`))
+	send(`{"type":"subscribe","id":1,"channel":"count","data":[2]}`)
 	for _, want := range []string{"0", "1"} {
 		if msg := next(t, received); msg.Type != typeNext || msg.ID != 1 || string(msg.Data) != want {
 			t.Errorf("next: %+v, want %s", msg, want)
@@ -225,7 +305,7 @@ func TestStream(t *testing.T) {
 		t.Errorf("done: %+v", msg)
 	}
 
-	deliver([]byte(`{"type":"subscribe","id":2,"channel":"count","data":[-1]}`))
+	send(`{"type":"subscribe","id":2,"channel":"count","data":[-1]}`)
 	if msg := next(t, received); msg.Type != typeError || msg.ID != 2 {
 		t.Errorf("error: %+v", msg)
 	}
@@ -235,9 +315,9 @@ func TestStream(t *testing.T) {
 	}
 
 	// An endless stream runs until Dart cancels it.
-	deliver([]byte(`{"type":"subscribe","id":4,"channel":"count","data":[0]}`))
+	send(`{"type":"subscribe","id":4,"channel":"count","data":[0]}`)
 	next(t, received)
-	deliver([]byte(`{"type":"cancel","id":4}`))
+	send(`{"type":"cancel","id":4}`)
 	select {
 	case <-stopped:
 	case <-time.After(time.Second):
@@ -288,7 +368,7 @@ func TestMarshalPanic(t *testing.T) {
 	if msg := request(t, received, 1, "bad", `[]`); msg.Type != typeError || !strings.Contains(msg.Error, "broken marshaler") {
 		t.Errorf("bad = %+v", msg)
 	}
-	deliver([]byte(`{"type":"subscribe","id":2,"channel":"badStream","data":[]}`))
+	send(`{"type":"subscribe","id":2,"channel":"badStream","data":[]}`)
 	if msg := next(t, received); msg.Type != typeError || !strings.Contains(msg.Error, "broken marshaler") {
 		t.Errorf("badStream = %+v", msg)
 	}
@@ -305,7 +385,7 @@ func TestReconnectDropsOldAnswers(t *testing.T) {
 	Export("slow", func() string { <-release; return "old" })
 	Export("fast", func() string { return "new" })
 
-	deliver([]byte(`{"type":"request","id":1,"channel":"slow","data":[]}`))
+	send(`{"type":"request","id":1,"channel":"slow","data":[]}`)
 	time.Sleep(10 * time.Millisecond) // the handler is running
 	received := fakeDart(t)
 	close(release)
@@ -325,7 +405,7 @@ func TestReconnectDropsOldAnswers(t *testing.T) {
 // waiting forever.
 func TestReconnectFailsRequests(t *testing.T) {
 	sent := make(chan struct{}, 1)
-	connect(func([]byte) { sent <- struct{}{} }) // never answers
+	connect(func() { sent <- struct{}{} }) // never answers
 	t.Cleanup(disconnect)
 
 	failed := make(chan error, 1)
@@ -334,7 +414,7 @@ func TestReconnectFailsRequests(t *testing.T) {
 		failed <- err
 	}()
 	<-sent
-	connect(func([]byte) {})
+	connect(func() {})
 	select {
 	case err := <-failed:
 		if !errors.Is(err, errReconnected) {
@@ -358,7 +438,7 @@ func TestRequestQueuedBeforeConnect(t *testing.T) {
 	}()
 	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
 		out.Lock()
-		queued := len(out.queued)
+		queued := out.queued
 		out.Unlock()
 		if queued > 0 {
 			break
@@ -367,13 +447,9 @@ func TestRequestQueuedBeforeConnect(t *testing.T) {
 			t.Fatal("request not queued")
 		}
 	}
-	connect(func(raw []byte) {
-		var msg message
-		json.Unmarshal(raw, &msg)
-		reply, _ := json.Marshal(message{Type: typeResponse, ID: msg.ID, Data: json.RawMessage(`"yes"`)})
-		go deliver(reply)
+	answerTo(t, func(message) message {
+		return message{Type: typeResponse, Data: json.RawMessage(`"yes"`)}
 	})
-	t.Cleanup(disconnect)
 	select {
 	case got := <-answer:
 		if got != "yes" {
@@ -398,7 +474,7 @@ func TestStart(t *testing.T) {
 	if msg := request(t, received, 1, "late", `[]`); string(msg.Data) != `"ready"` {
 		t.Errorf("late = %+v", msg)
 	}
-	connect(func([]byte) {})
+	connect(func() {})
 	if calls != 1 {
 		t.Errorf("Start function ran %d times", calls)
 	}
@@ -426,4 +502,320 @@ func resetStartup(t *testing.T) {
 		reset()
 		begin()
 	})
+}
+
+func TestFrame(t *testing.T) {
+	msg := message{Type: typeNext, ID: 7, Channel: `a"b`, Data: json.RawMessage(`{"x":null}`), Error: "<e>",
+		blobs: []blob{{data: []byte{1, 2}}, {path: []any{"x"}, data: nil}}}
+	segments, size := msg.frame()
+	var raw []byte
+	for _, s := range segments {
+		raw = append(raw, s...)
+	}
+	if len(raw) != size {
+		t.Fatalf("size %d, frame has %d bytes", size, len(raw))
+	}
+	got, rest, err := readFrame(append(raw, 9))
+	if err != nil || !bytes.Equal(rest, []byte{9}) {
+		t.Fatalf("readFrame: %v, rest %v", err, rest)
+	}
+	if got.Type != msg.Type || got.ID != msg.ID || got.Channel != msg.Channel || string(got.Data) != string(msg.Data) || got.Error != msg.Error {
+		t.Errorf("got %+v, want %+v", got, msg)
+	}
+	if len(got.blobs) != 2 || !bytes.Equal(got.blobs[0].data, []byte{1, 2}) || len(got.blobs[0].path) != 0 ||
+		len(got.blobs[1].data) != 0 || got.blobs[1].path[0] != "x" {
+		t.Errorf("blobs %+v", got.blobs)
+	}
+	for _, bad := range [][]byte{raw[:5], raw[:len(raw)-1], frameOf(`{"type":"emit"}`, []byte{1})} {
+		if _, _, err := readFrame(bad); err == nil {
+			t.Errorf("readFrame(%v) accepted a broken frame", bad)
+		}
+	}
+}
+
+type tile struct {
+	Y      int    `json:"y"`
+	Pixels []byte `json:"pixels"`
+	Mask   []byte `json:"mask,omitempty"`
+	Small  []byte
+	Ptr    *[]byte `json:"ptr"`
+}
+
+type embeds struct {
+	tile
+	Extra []byte `json:"extra"`
+}
+
+type marshals struct{ Data []byte }
+
+func (m marshals) MarshalJSON() ([]byte, error) { return []byte(`"custom"`), nil }
+
+type textBytes []byte
+
+func (textBytes) MarshalText() ([]byte, error) { return []byte("text"), nil }
+
+func TestEncodeData(t *testing.T) {
+	ptr := []byte{9}
+	cases := []struct {
+		name  string
+		value any
+		data  string
+		paths []string
+	}{
+		{"bytes", []byte{1, 2, 3}, ``, []string{`[]`}},
+		{"empty bytes", []byte{}, `""`, nil},
+		{"nil bytes", []byte(nil), `null`, nil},
+		{"text bytes", textBytes{1}, `"text"`, nil},
+		{"struct", tile{Y: 1, Pixels: []byte{1}, Mask: []byte{2}, Ptr: &ptr}, `{"y":1,"pixels":null,"Small":null,"ptr":"CQ=="}`, []string{`["pixels"]`, `["mask"]`}},
+		{"pointer", &tile{Small: []byte{1}}, `{"y":0,"pixels":null,"Small":null,"ptr":null}`, []string{`["Small"]`}},
+		{"no blobs", tile{Y: 2}, `{"y":2,"pixels":null,"Small":null,"ptr":null}`, nil},
+		{"embedded", embeds{Extra: []byte{1}}, `{"y":0,"pixels":null,"Small":null,"ptr":null,"extra":"AQ=="}`, nil},
+		{"marshaler", marshals{[]byte{1}}, `"custom"`, nil},
+		{"nested", []tile{{Pixels: []byte{1}}}, `[{"y":0,"pixels":"AQ==","Small":null,"ptr":null}]`, nil},
+	}
+	for _, c := range cases {
+		data, blobs, err := encodeData(c.value)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		var paths []string
+		for _, b := range blobs {
+			raw, _ := json.Marshal(b.path)
+			if b.path == nil {
+				raw = []byte("[]")
+			}
+			paths = append(paths, string(raw))
+		}
+		if string(data) != c.data || fmt.Sprint(paths) != fmt.Sprint(c.paths) {
+			t.Errorf("%s: %s %v, want %s %v", c.name, data, paths, c.data, c.paths)
+		}
+	}
+	// The value sent is not changed.
+	v := tile{Pixels: []byte{1}}
+	encodeData(v)
+	encodeData(&v)
+	if v.Pixels == nil {
+		t.Error("encodeData changed the value")
+	}
+}
+
+func TestDecodeBlobs(t *testing.T) {
+	b := []byte{1, 2, 3}
+	var bs []byte
+	if err := decode(nil, []blob{{data: b}}, &bs); err != nil || !bytes.Equal(bs, b) {
+		t.Errorf("bytes: %v %v", bs, err)
+	}
+	var tl *tile
+	if err := decode(json.RawMessage(`{"y":4,"pixels":null}`), []blob{{path: []any{"pixels"}, data: b}, {path: []any{"ptr"}, data: b}}, &tl); err != nil ||
+		tl.Y != 4 || !bytes.Equal(tl.Pixels, b) || !bytes.Equal(*tl.Ptr, b) {
+		t.Errorf("struct: %+v %v", tl, err)
+	}
+	// Elsewhere the blob becomes base64 for encoding/json.
+	var anything any
+	if err := decode(nil, []blob{{data: b}}, &anything); err != nil || anything != "AQID" {
+		t.Errorf("any: %v %v", anything, err)
+	}
+	var m map[string][]byte
+	if err := decode(json.RawMessage(`{"k":null}`), []blob{{path: []any{"k"}, data: b}}, &m); err != nil || !bytes.Equal(m["k"], b) {
+		t.Errorf("map: %v %v", m, err)
+	}
+	var e embeds
+	if err := decode(json.RawMessage(`{"extra":null}`), []blob{{path: []any{"extra"}, data: b}}, &e); err != nil || !bytes.Equal(e.Extra, b) {
+		t.Errorf("embedded: %+v %v", e, err)
+	}
+	if err := decode(json.RawMessage(`{}`), []blob{{path: []any{"a", "b"}, data: b}}, &m); err == nil {
+		t.Error("a blob path that does not exist was accepted")
+	}
+}
+
+func TestBlobsOnTheWire(t *testing.T) {
+	received := fakeDart(t)
+	Export("take", func(b []byte, tl tile) int { return len(b) + len(tl.Pixels) })
+	Export("bytes", func(n int) []byte { return bytes.Repeat([]byte{7}, n) })
+	Export("tile", func() *tile { return &tile{Y: 3, Pixels: []byte{1, 2}} })
+
+	send(`{"type":"request","id":1,"channel":"take","data":[null,{"pixels":null}],"bin":[[0],[1,"pixels"]]}`, []byte{1, 2, 3}, []byte{4})
+	if msg := next(t, received); string(msg.Data) != "4" {
+		t.Errorf("take = %+v", msg)
+	}
+	send(`{"type":"request","id":2,"channel":"bytes","data":[5]}`)
+	if msg := next(t, received); len(msg.Data) != 0 || len(msg.blobs) != 1 || !bytes.Equal(msg.blobs[0].data, []byte{7, 7, 7, 7, 7}) {
+		t.Errorf("bytes = %+v", msg)
+	}
+	send(`{"type":"request","id":3,"channel":"tile","data":[]}`)
+	if msg := next(t, received); string(msg.Data) != `{"y":3,"pixels":null,"Small":null,"ptr":null}` || len(msg.blobs) != 1 || msg.blobs[0].path[0] != "pixels" {
+		t.Errorf("tile = %+v", msg)
+	}
+	send(`{"type":"request","id":4,"channel":"take","data":[null,{}],"bin":[[]]}`, []byte{1})
+	if msg := next(t, received); msg.Type != typeError {
+		t.Errorf("bytes instead of arguments = %+v", msg)
+	}
+}
+
+// A request waits for its answer on the sending thread, a slow channel
+// stops waiting until it is fast again.
+func TestAwait(t *testing.T) {
+	received := make(chan message, 64)
+	disconnect()
+	connect(func() {}) // the doorbell is ignored, take only after await
+	t.Cleanup(func() { connect(func() {}) })
+
+	var delay time.Duration
+	Export("maybeSlow", func() string { time.Sleep(delay); return "ok" })
+	takeAll := func() {
+		for _, msg := range takeMessages(t) {
+			received <- msg
+		}
+	}
+
+	a := send(`{"type":"request","id":1,"channel":"maybeSlow","data":[]}`)
+	if a == nil || !await(a) {
+		t.Fatal("fast request was not answered within syncWait")
+	}
+	takeAll()
+	if msg := next(t, received); string(msg.Data) != `"ok"` {
+		t.Errorf("answer = %+v", msg)
+	}
+
+	delay = 5 * syncWait
+	if a := send(`{"type":"request","id":2,"channel":"maybeSlow","data":[]}`); await(a) {
+		t.Error("slow request reported an answer")
+	}
+	if a := send(`{"type":"request","id":3,"channel":"maybeSlow","data":[]}`); a != nil {
+		t.Error("send waits for a slow channel")
+	}
+	time.Sleep(3 * delay)
+	takeAll()
+	next(t, received)
+	next(t, received)
+
+	// Once it is fast again, sends wait again.
+	delay = 0
+	send(`{"type":"request","id":4,"channel":"maybeSlow","data":[]}`)
+	time.Sleep(10 * time.Millisecond)
+	if a := send(`{"type":"request","id":5,"channel":"maybeSlow","data":[]}`); a == nil || !await(a) {
+		t.Error("send does not wait for a channel that is fast again")
+	}
+}
+
+// Large frames are decoded by the reader goroutine, later small ones still
+// come after them.
+func TestLargeFramesKeepOrder(t *testing.T) {
+	fakeDart(t)
+	stopped := make(chan struct{})
+	Export("big", func(ctx context.Context, pad string) <-chan int {
+		go func() {
+			<-ctx.Done()
+			close(stopped)
+		}()
+		return make(chan int)
+	})
+	pad := strings.Repeat("x", 2*inlineJSON)
+	if a := send(`{"type":"subscribe","id":1,"channel":"big","data":["` + pad + `"]}`); a != nil {
+		t.Error("a large frame was handled inline")
+	}
+	if a := send(`{"type":"emit","channel":"none"}`, make([]byte, 2*inlineSize)); a != nil {
+		t.Error("a large frame was handled inline")
+	}
+	send(`{"type":"cancel","id":1}`)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("the cancel overtook the subscribe")
+	}
+}
+
+// Go stops sending stream values Dart has not handled.
+func TestBackpressure(t *testing.T) {
+	received := make(chan message, 2*maxUnacked)
+	connectDart(t, func(msg message) { received <- msg })
+	Export("endless", func(ctx context.Context) <-chan int {
+		ch := make(chan int)
+		go func() {
+			defer close(ch)
+			for i := 0; ; i++ {
+				select {
+				case ch <- i:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return ch
+	})
+	send(`{"type":"subscribe","id":1,"channel":"endless","data":[]}`)
+	count := func() int {
+		for n := 0; ; n++ {
+			select {
+			case <-received:
+			case <-time.After(50 * time.Millisecond):
+				return n
+			}
+		}
+	}
+	if n := count(); n != maxUnacked {
+		t.Fatalf("got %d values without credit, want %d", n, maxUnacked)
+	}
+	send(fmt.Sprintf(`{"type":"credit","id":1,"data":[10,%d]}`, 10*30))
+	if n := count(); n < 10 || n > 11 {
+		t.Errorf("got %d values for a credit of 10", n)
+	}
+	send(`{"type":"cancel","id":1}`)
+}
+
+// On the web the first message of a run of Go is pushed, the next ones
+// ring and wait in the outbox.
+func TestPush(t *testing.T) {
+	disconnect()
+	Emit("early", 1)
+	var pushed []message
+	rings := 0
+	decode := func(segments [][]byte) (msgs []message) {
+		var raw []byte
+		for _, s := range segments {
+			raw = append(raw, s...)
+		}
+		for len(raw) > 0 {
+			msg, rest, err := readFrame(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			msgs = append(msgs, msg)
+			raw = rest
+		}
+		return msgs
+	}
+	connectPush(func() { rings++ }, func(segments [][]byte, size int) {
+		pushed = append(pushed, decode(segments)...)
+	})
+	t.Cleanup(func() { connect(func() {}) })
+	if len(pushed) != 1 || pushed[0].Channel != "early" {
+		t.Fatalf("queued message not pushed: %+v", pushed)
+	}
+
+	resumePush() // Dart sends
+	Emit("first", []byte{1, 2})
+	Emit("second", 2)
+	Emit("third", 3)
+	if len(pushed) != 2 || pushed[1].Channel != "first" || !bytes.Equal(pushed[1].blobs[0].data, []byte{1, 2}) {
+		t.Errorf("pushed %+v", pushed)
+	}
+	if rings != 1 {
+		t.Errorf("rang %d times, want once", rings)
+	}
+	resumePush()
+	Emit("fourth", 4) // the outbox is not empty, it must not overtake
+	segments, _ := take()
+	var channels []string
+	for _, msg := range decode(segments) {
+		channels = append(channels, msg.Channel)
+	}
+	if fmt.Sprint(channels) != "[second third fourth]" {
+		t.Errorf("took %v", channels)
+	}
+	Emit("fifth", 5)
+	if len(pushed) != 3 || pushed[2].Channel != "fifth" {
+		t.Errorf("not pushed after take: %+v", pushed)
+	}
 }

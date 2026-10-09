@@ -1,7 +1,9 @@
 part of 'bridge.dart';
 
 /// Sends messages to Go. Data is encoded as JSON, so it can be null, bool,
-/// num, String, or Lists and Maps with String keys of those.
+/// num, String, or Lists and Maps with String keys of those. A Uint8List as
+/// the data, as an element of a List data or as a value of a Map there is
+/// sent as raw bytes, for a Go []byte.
 class Emitter {
   Emitter._(this._bridge);
 
@@ -21,13 +23,13 @@ class Emitter {
   Future<T> request<T>(String channel, [Object? data]) async {
     final id = ++_bridge._lastId;
     final completer = Completer<Object?>();
+    _bridge._pending[id] = (channel, completer);
     _bridge._post({
       'type': 'request',
       'id': id,
       'channel': channel,
       'data': data,
     });
-    _bridge._pending[id] = (channel, completer);
     return await completer.future as T;
   }
 
@@ -37,15 +39,15 @@ class Emitter {
   /// cancelled. The stream ends when Go closes the channel, and fails with a
   /// [GolangException] when Go returns an error.
   ///
-  /// Go does not wait for the listener: values arrive as fast as Go sends
-  /// them and are buffered while the subscription is paused.
+  /// Go sends ahead of the listener, but only so far: while the
+  /// subscription is paused, Go stops after 1024 values or 8 MiB.
   Stream<Object?> subscribe(String channel, [Object? data]) {
     late final StreamController<Object?> controller;
     int? id;
     controller = StreamController<Object?>(
       onListen: () {
         id = ++_bridge._lastId;
-        _bridge._subscriptions[id!] = (channel, controller);
+        _bridge._subscriptions[id!] = _Subscription(channel, controller);
         _bridge._post({
           'type': 'subscribe',
           'id': id,
@@ -53,6 +55,7 @@ class Emitter {
           'data': data,
         });
       },
+      onResume: () => _bridge._credit(id!),
       onCancel: () {
         if (_bridge._subscriptions.remove(id) != null) {
           _bridge._post({'type': 'cancel', 'id': id});

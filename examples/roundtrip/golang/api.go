@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -177,6 +178,37 @@ func DescribeBytes(b []byte) BytesInfo {
 
 //fluffy:export
 func EchoBytes(b []byte) []byte { return b }
+
+// Photo has byte fields. Sent as a whole value, its byte slices travel as
+// raw bytes next to the JSON, deeper ones (Pages) as base64.
+type Photo struct {
+	Name      string   `json:"name"`
+	Data      []byte   `json:"data"`
+	Thumbnail []byte   `json:"thumbnail,omitempty"`
+	Pages     [][]byte `json:"pages"`
+}
+
+//fluffy:export
+func EchoPhoto(p Photo) Photo { return p }
+
+// Photos streams n photos, photo i has i+1 bytes of data.
+//
+//fluffy:export
+func Photos(ctx context.Context, n int) <-chan *Photo {
+	out := make(chan *Photo)
+	go func() {
+		defer close(out)
+		for i := 0; i < n; i++ {
+			p := &Photo{Name: strconv.Itoa(i), Data: bytes.Repeat([]byte{byte(i)}, i+1)}
+			select {
+			case out <- p:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
 
 // Repeat returns s n times.
 //
@@ -379,6 +411,31 @@ func Ticks(ctx context.Context) <-chan int {
 	}()
 	return out
 }
+
+var flooded atomic.Int64
+
+// Flood sends numbers as fast as the stream takes them and counts them in
+// Flooded.
+//
+//fluffy:export
+func Flood(ctx context.Context) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for i := 0; ; i++ {
+			select {
+			case out <- i:
+				flooded.Add(1)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+//fluffy:export
+func Flooded() int64 { return flooded.Load() }
 
 //fluffy:export
 func Stats() StreamStats {

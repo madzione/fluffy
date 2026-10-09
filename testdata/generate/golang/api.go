@@ -64,6 +64,11 @@ func Clock(ctx context.Context) <-chan string { return nil }
 //fluffy:export
 func Reset() error { return nil }
 
+// Bytes travel raw as arguments and results, base64 inside other values.
+//
+//fluffy:export
+func Thumbnail(image []byte, size *[]byte, all [][]byte) ([]byte, error) { return image, nil }
+
 // Dart is implemented in Dart.
 //
 //fluffy:dart
@@ -72,6 +77,7 @@ type Dart interface {
 	Confirm(ctx context.Context, question string) (bool, error)
 	Progress(percent float64)
 	Saved(user User) error
+	Picture(name string) ([]byte, error)
 }
 
 func init() {
@@ -80,6 +86,7 @@ func init() {
 	fluffy.Handle("ping", func(struct{}) (struct{}, error) { return struct{}{}, nil })
 	fluffy.Handle("echo", func(text string) (string, error) { return text, nil })
 	fluffy.On("log", func(line string) {})
+	fluffy.On("upload", func(data []byte) {})
 
 	fluffy.Start(func() error {
 		fluffy.Bind("todo", todo.NewService(newTodoNotifier()))

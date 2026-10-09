@@ -483,6 +483,55 @@ final checks = <Check>[
     }
     return ms(watch);
   }),
+  Check('Strings', 'byte fields of a struct there and back', () async {
+    final data = Uint8List.fromList(List.generate(1 << 20, (i) => i * 7));
+    final photo = golang.Photo(
+      name: 'p',
+      data: data,
+      thumbnail: Uint8List(0),
+      pages: [
+        Uint8List.fromList([1, 2]),
+        Uint8List(0),
+      ],
+    );
+    final back = await golang.echoPhoto(photo);
+    expectEqual(back.name, 'p', 'name');
+    expectEqual(back.data, data, 'data');
+    // omitempty: Go leaves the empty slice out.
+    expectEqual(back.thumbnail, null, 'thumbnail');
+    expectEqual(back.pages, [
+      [1, 2],
+      <int>[],
+    ], 'pages');
+    return null;
+  }),
+  Check('Strings', 'raw bytes in a map Dart → Go', () async {
+    // The generated toJson sends base64, a map with a Uint8List sends the
+    // bytes raw, Go puts them into the struct field.
+    final back = golang.Photo.fromJson(
+      await golang.emitter.request<Object?>('EchoPhoto', [
+        {
+          'name': 'raw',
+          'data': Uint8List.fromList([9, 8, 7]),
+          'pages': null,
+        },
+      ]),
+    );
+    expectEqual(back.data, [9, 8, 7], 'data');
+    return null;
+  }),
+  Check('Strings', 'stream of structs with bytes', () async {
+    final photos = await golang.photos(300).toList();
+    expectEqual(photos.length, 300, 'length');
+    for (final (i, p) in photos.indexed) {
+      if (p == null ||
+          p.data.length != i + 1 ||
+          p.data.any((b) => b != i % 256)) {
+        throw CheckFailure('photo $i is wrong');
+      }
+    }
+    return null;
+  }),
   Check('Strings', '1M characters Go → Dart', () async {
     final watch = Stopwatch()..start();
     final text = await golang.repeat('ab€', 1 << 18);
@@ -663,6 +712,24 @@ final checks = <Check>[
           now.cancelled == before.cancelled + 1;
     }, 'Go saw the cancel');
     return null;
+  }),
+
+  Check('Streams', 'a paused listener stops Go', () async {
+    final before = await golang.flooded();
+    final subscription = golang.flood().listen(null)..pause();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    final sent = await golang.flooded() - before;
+    if (sent > 1100) {
+      await subscription.cancel();
+      throw CheckFailure('Go sent $sent values to a paused listener');
+    }
+    subscription.resume();
+    await eventually(
+      () async => await golang.flooded() - before > 10 * 1024,
+      'Go sends again after resume',
+    );
+    await subscription.cancel();
+    return '$sent values while paused';
   }),
 
   // Concurrency

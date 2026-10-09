@@ -23,6 +23,10 @@ Stream<String> clock() =>
 Future<void> reset() =>
     emitter.request<Object?>('Reset', []);
 
+/// Bytes travel raw as arguments and results, base64 inside other values.
+Future<Uint8List> thumbnail(Uint8List image, Uint8List? size, List<Uint8List> all) async =>
+    switch (await emitter.request<Object?>('Thumbnail', [image, size, [for (final x0 in all) base64Encode(x0)]])) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) };
+
 Future<Counts> int_(int int_, String emitter_) async =>
     Counts.fromJson(await emitter.request<Object?>('Int', [int_, emitter_]));
 
@@ -37,6 +41,8 @@ Future<String> echo(String text) async =>
     (await emitter.request<Object?>('echo', text)) as String;
 
 void log(String line) => emitter.emit('log', line);
+
+void upload(Uint8List data) => emitter.emit('upload', data);
 
 /// The data Go emits on 'tick' (fluffy.Emit).
 Stream<DateTime> tick() =>
@@ -99,6 +105,8 @@ abstract class Dart {
   /// Confirm asks the user.
   FutureOr<bool> confirm(String question);
 
+  FutureOr<Uint8List> picture(String name);
+
   void progress(double percent);
 
   FutureOr<void> saved(User user);
@@ -112,6 +120,10 @@ abstract class Dart {
     receiver.handle('Dart.Confirm', (data) async {
       final args = data as List<dynamic>;
       return await impl.confirm(args[0] as String);
+    });
+    receiver.handle('Dart.Picture', (data) async {
+      final args = data as List<dynamic>;
+      return await impl.picture(args[0] as String);
     });
     _subscriptions.add(receiver.on<Object?>('Dart.Progress').listen((data) {
       final args = data as List<dynamic>;
@@ -173,7 +185,7 @@ class User {
       created: switch (m['created']) { final v0? => DateTime.parse(v0 as String), _ => null },
       name: m['name'] as String,
       age: m['age'] as int?,
-      avatar: switch (m['avatar']) { final String v0 => base64Decode(v0), _ => Uint8List(0) },
+      avatar: switch (m['avatar']) { final Uint8List v0 => v0, final String v0 => base64Decode(v0), _ => Uint8List(0) },
       tags: (m['tags'] as List<dynamic>?)?.map((x0) => x0 as String).toList() ?? const <String>[],
       scores: (m['scores'] as Map<String, dynamic>?)?.map((k0, x0) => MapEntry(k0, (x0 as num).toDouble())) ?? const <String, double>{},
       friends: (m['friends'] as List<dynamic>?)?.map((x0) => switch (x0) { final v1? => User.fromJson(v1), _ => null }).toList() ?? const <User?>[],

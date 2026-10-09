@@ -35,7 +35,7 @@ fvm flutter test integration_test -d linux        # benchmarks print at the end
 `Renderer.Render(ctx, View) (<-chan Tile, error)` becomes
 `Stream<Tile> golang.fractal.render(View)`. Workers take 16-row bands from
 a queue, check `ctx` before every row and send finished tiles (RGBA bytes,
-base64 on the wire) with a running `done`/`total` count. The controller
+raw bytes on the wire) with a running `done`/`total` count. The controller
 copies each tile into a frame buffer and decodes it into a `ui.Image`, at
 most one decode at a time.
 
@@ -53,9 +53,12 @@ Go compiled to WebAssembly has one thread, the browser's main thread, and
 only returns to the browser when every goroutine is blocked. A worker that
 computes without blocking would freeze the page until the image is done,
 because Flutter never gets to process a tile or draw a frame. `yield_js.go`
-sleeps for a millisecond after each tile, which hands the thread back to the
-browser. Natively `yield` does nothing. Any long computation in Go on the
-web needs a pause like this.
+waits for a `MessageChannel` message after each tile, which hands the thread
+back to the browser for about 0.05 ms. `time.Sleep(time.Millisecond)` would
+do the same, but browsers stretch timeouts set from timeouts to 4 ms, which
+adds up over hundreds of tiles. Natively `yield` does nothing. Any long
+computation in Go on the web needs a pause like this, `fluffy.Yield()` is
+the same for code that imports fluffy.
 
 ## What the bridge costs
 
@@ -65,19 +68,24 @@ JavaScript):
 
 | Benchmark | Linux | Web |
 |-----------|-------|-----|
-| Go → Dart, one way | median 1.09 ms | — (same thread) |
+| Go → Dart, one way | median 11 µs | — (same thread) |
 | isolate → main isolate, Dart only | median 1.06 ms | — |
-| one call at a time | 1.1 ms | 0.13 ms |
-| 10 000 calls in flight | 30 µs each | 93 µs each |
-| Dart → Go 1 MiB | 52 MB/s | 25 MB/s |
-| Go → Dart 1 MiB | 91 MB/s | 110 MB/s |
-| Go → Dart 16 MiB | 134 MB/s | 115 MB/s |
-| stream values | 27 k/s | 55 k/s |
-| stream 256 KiB chunks | 101 MB/s | 118 MB/s |
+| one call at a time | 25 µs | 0.14 ms |
+| 10 000 calls in flight | 19 µs each | 92 µs each |
+| Dart → Go 1 MiB | 2.5 GB/s | 0.8 GB/s |
+| Dart → Go 16 MiB | 2.6 GB/s | 1.8 GB/s |
+| Go → Dart 1 MiB | 0.54 GB/s | 0.59 GB/s |
+| Go → Dart 16 MiB | 1.3 GB/s | 0.69 GB/s |
+| stream values | 380 k/s | 120 k/s |
+| stream 256 KiB chunks | 1.35 GB/s | 0.5–0.65 GB/s |
 
-On Linux every message from Go waits about 1 ms before Dart handles it.
-A message from another Dart isolate waits just as long, so the delay comes
-from the Flutter Linux embedder scheduling work on its main thread, not
-from fluffy. It limits calls made one after another, not throughput:
-calls that are in flight together share the wait. Bytes travel as base64
-inside JSON, so large payloads cost encoding time on both sides.
+The Go → Dart byte benchmarks include filling the bytes in Go
+(`bench.pattern`), which takes most of their time.
+
+On Linux a message from Go waits about 1 ms before Dart handles it: a
+message from another Dart isolate waits just as long, the Flutter Linux
+embedder schedules work on its main thread that way. fluffy avoids the wait
+for answers: Dart's send blocks for up to 250 µs until Go has answered, and
+then takes the answer right away. Streams and events still wait, but every
+message waiting is taken at once, so the wait limits latency, not
+throughput. Bytes travel raw next to the JSON, without base64.

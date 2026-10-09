@@ -15,6 +15,7 @@ func init() {
 	fluffy.Export("FindUser", FindUser)
 	fluffy.Export("Clock", Clock)
 	fluffy.Export("Reset", Reset)
+	fluffy.Export("Thumbnail", Thumbnail)
 	fluffy.Export("Int", Int)
 	fluffy.Export("todo.Version", todo.Version)
 }
@@ -29,6 +30,10 @@ type fluffyDart struct{}
 
 func (fluffyDart) Confirm(ctx context.Context, p1 string) (bool, error) {
 	return fluffy.Request[bool](ctx, "Dart.Confirm", []any{p1})
+}
+
+func (fluffyDart) Picture(p1 string) ([]byte, error) {
+	return fluffy.Request[[]byte](context.Background(), "Dart.Picture", []any{p1})
 }
 
 func (fluffyDart) Progress(p1 float64) {

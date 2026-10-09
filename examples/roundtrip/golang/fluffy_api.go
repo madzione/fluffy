@@ -32,6 +32,8 @@ func init() {
 	fluffy.Export("AllBytes", AllBytes)
 	fluffy.Export("DescribeBytes", DescribeBytes)
 	fluffy.Export("EchoBytes", EchoBytes)
+	fluffy.Export("EchoPhoto", EchoPhoto)
+	fluffy.Export("Photos", Photos)
 	fluffy.Export("Repeat", Repeat)
 	fluffy.Export("PreciseTime", PreciseTime)
 	fluffy.Export("FormatTime", FormatTime)
@@ -50,6 +52,8 @@ func init() {
 	fluffy.Export("Broken", Broken)
 	fluffy.Export("Empty", Empty)
 	fluffy.Export("Ticks", Ticks)
+	fluffy.Export("Flood", Flood)
+	fluffy.Export("Flooded", Flooded)
 	fluffy.Export("Stats", Stats)
 	fluffy.Export("Sleep", Sleep)
 }
