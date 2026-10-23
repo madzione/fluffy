@@ -1,8 +1,14 @@
 # fluffy - Flutter with Go
 
-> **Transparency note:** This project was built with the help of agentic AI. The base skeleton and prototype were written and built manually by a human, and all source code has been reviewed manually by a human. This does not mean there are no bugs ;-)
+> [!NOTE]
+> This project is built with the help of agentic AI.
+> The base skeleton and prototype were written and built manually by a human,
+> and all source code has been reviewed manually by a human. This does not mean
+> there are no bugs ;-)
 
-![](./screenshot.png)
+<p align="center">
+  <img src="screenshot.png" alt="fluffy demo app">
+</p>
 
 Fluffy is a CLI tool, still in development, that integrates Go code into any Flutter (Dart) project. On native targets the Go code is compiled to a C library and called over `dart:ffi`; on the web it runs as WebAssembly. On native platforms a Flutter build hook compiles the Go code, so `flutter run`, `flutter build` and `flutter test` build it automatically (on the web `fluffy run` and `fluffy build` do it), and it generates a typed Dart API from your plain Go functions, services and structs. Underneath, a small message layer carries requests, events and streams in both directions, so Go can call back into Dart as well.
 
@@ -348,11 +354,11 @@ The interface can live in your app's package too, so it stays testable without F
 | `time.Duration` | `Duration` |
 | types with `MarshalText` | `String` |
 | `any`, interfaces, types with `MarshalJSON` | `Object?` |
-
-Like `encoding/json`, a `MarshalJSON` or `MarshalText` method with a pointer receiver only counts where Go can take the value's address: behind a pointer, in a slice, and when Go decodes. A `Level` with `func (*Level) MarshalText` returned as `Level` is sent as a struct, returned as `*Level` as a string. A struct that contains such a type and is sent both ways fails to generate. Give these methods a value receiver.
 | `<-chan T` result | `Stream<T>` |
 | `error` result | throws `GolangException` |
 | channels as data, funcs, complex numbers | not supported, `fluffy generate` fails |
+
+Like `encoding/json`, a `MarshalJSON` or `MarshalText` method with a pointer receiver only counts where Go can take the value's address: behind a pointer, in a slice, and when Go decodes. A `Level` with `func (*Level) MarshalText` returned as `Level` is sent as a struct, returned as `*Level` as a string. A struct that contains such a type and is sent both ways fails to generate. Give these methods a value receiver.
 
 A struct gets one class however often it is used. If two packages have a struct with the same name, the second class gets the package name as a prefix.
 
