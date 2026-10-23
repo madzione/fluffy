@@ -1,0 +1,15 @@
+# The Dart package of golang/: its build hook (hook/build.dart) builds the Go
+# library with "fluffy lib" and hands it to Flutter, which bundles it with the
+# app. The app depends on it with a path dependency.
+#
+# Owned by fluffy: fluffy update overwrites this file.
+name: fluffy_golang
+description: Builds the Go library in golang/ for the app.
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  code_assets: ^1.0.0
+  hooks: '>=1.0.0 <3.0.0'

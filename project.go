@@ -147,9 +147,14 @@ func initProject(dir string, demo, patchGtk bool) error {
 		fmt.Fprintf(os.Stderr, "fluffy: %v\nfluffy: fix the Go code and run fluffy generate\n", err)
 	}
 
+	var add []string
 	if !hasDependency(pubspec, "ffi") {
-		if err := flutter(root, "pub", "add", "ffi"); err != nil {
-			fmt.Fprintln(os.Stderr, "fluffy: could not add the ffi package, run \"flutter pub add ffi\" yourself")
+		add = append(add, "ffi")
+	}
+	add = append(add, missingHookPackage(pubspec)...)
+	if len(add) > 0 {
+		if err := flutter(root, append([]string{"pub", "add"}, add...)...); err != nil {
+			fmt.Fprintf(os.Stderr, "fluffy: could not add the packages, run \"flutter pub add %s\" yourself. %s\n", quoteArgs(add), hookFloor)
 		}
 	}
 
@@ -164,9 +169,34 @@ Mark Go functions in golang/ with //fluffy:export and run "fluffy generate"
 (fluffy run does it for you) to call them from Dart. The generated Dart API
 is lib/golang/api.g.dart.
 
-Native builds need the fluffy command on PATH. For web use "fluffy run".
+Native builds, and flutter test, need the fluffy command on PATH. For web
+use "fluffy run".
 `, pkg)
 	return nil
+}
+
+// hookFloor is shown when the hook package can't be added.
+const hookFloor = "The build hook in golang/ needs Flutter 3.38 or newer."
+
+// missingHookPackage returns the pub add argument for the path dependency on
+// golang/, or nothing when the app has it.
+func missingHookPackage(pubspec []byte) []string {
+	if hasDependency(pubspec, hookPackage) {
+		return nil
+	}
+	return []string{hookPackage + "@{path: golang}"}
+}
+
+// quoteArgs joins pub add arguments for a message, quoting descriptors.
+func quoteArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = arg
+		if strings.ContainsAny(arg, " {") {
+			quoted[i] = "'" + arg + "'"
+		}
+	}
+	return strings.Join(quoted, " ")
 }
 
 type templateData struct{ Package string }
@@ -174,10 +204,22 @@ type templateData struct{ Package string }
 // The communication layer belongs to fluffy, not to the user: init and
 // update replace these directories with the templates of this fluffy
 // version, so the Go and Dart side always speak the same protocol.
-var layer = []struct{ src, dst string }{
-	{"_templates/layer/golang", "golang/fluffy"},
-	{"_templates/layer/dart", "lib/golang/src"},
+// The Dart package in golang/ (pubspec.yaml and hook/) belongs to fluffy as
+// well, the rest of golang/ is the user's: there only files of the
+// templates are written, none removed.
+var layer = []struct {
+	src, dst string
+	prune    bool // remove files the templates don't have
+}{
+	{"_templates/layer/golang", "golang/fluffy", true},
+	{"_templates/layer/dart", "lib/golang/src", true},
+	{"_templates/layer/hook", "golang/hook", true},
+	{"_templates/layer/package", "golang", false},
 }
+
+// hookPackage is the name of the Dart package in golang/ whose build hook
+// builds the Go library. The app has it as a path dependency.
+const hookPackage = "fluffy_golang"
 
 // updateProject brings an initialized project up to this fluffy version:
 // the communication layer, the build hooks and the generated API. The
@@ -193,7 +235,17 @@ func updateProject(root string, patchGtk bool) error {
 	if err := syncLayer(root, templateData{packageName(pubspec)}); err != nil {
 		return err
 	}
+	// Before the old build file patches go, so an SDK too old for the hook
+	// stops here.
+	if add := missingHookPackage(pubspec); len(add) > 0 {
+		if err := flutter(root, append([]string{"pub", "add"}, add...)...); err != nil {
+			return fmt.Errorf("could not add the %s package (golang/), run \"flutter pub add %s\" yourself. %s", hookPackage, quoteArgs(add), hookFloor)
+		}
+	}
 	if err := applyHooks(root, patchGtk); err != nil {
+		return err
+	}
+	if err := removeOldLibraries(root); err != nil {
 		return err
 	}
 	if _, err := generate(root, true); err != nil {
@@ -208,7 +260,7 @@ func syncLayer(root string, data templateData) error {
 	removed := false
 	defer func() {
 		if removed {
-			fmt.Println("fluffy: golang/fluffy/ and lib/golang/src/ belong to fluffy, files that are not part of it are removed")
+			fmt.Println("fluffy: golang/fluffy/, golang/hook/ and lib/golang/src/ belong to fluffy, files that are not part of it are removed")
 		}
 	}()
 	for _, dir := range layer {
@@ -240,6 +292,9 @@ func syncLayer(root string, data templateData) error {
 			if err := writeFile(target, content); err != nil {
 				return err
 			}
+		}
+		if !dir.prune {
+			continue
 		}
 
 		base := filepath.Join(root, dir.dst)
@@ -367,15 +422,16 @@ func packageName(pubspec []byte) string {
 }
 
 // findProjectRoot walks up from the working directory to the nearest
-// directory with a pubspec.yaml, so build hooks can call fluffy from anywhere
-// inside the project.
+// directory with a pubspec.yaml, so fluffy works from anywhere inside the
+// project. The pubspec.yaml of golang/ (the fluffy_golang package) is not
+// the project's.
 func findProjectRoot() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "pubspec.yaml")); err == nil {
+		if pubspec, err := os.ReadFile(filepath.Join(dir, "pubspec.yaml")); err == nil && packageName(pubspec) != hookPackage {
 			return dir, nil
 		}
 		parent := filepath.Dir(dir)

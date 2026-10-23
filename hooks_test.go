@@ -32,6 +32,83 @@ func TestUpsertBlockIsIdempotent(t *testing.T) {
 	}
 }
 
+// update removes the build file patches of older fluffy versions, leaving
+// the files as flutter create wrote them.
+func TestRemoveOldHooks(t *testing.T) {
+	original := "cmake_minimum_required(VERSION 3.14)\ninstall(FILES a)\n"
+	patched, _ := appendBlock(hashMarker, "add_custom_target(fluffy_golang ALL)")(original)
+	if got, err := removeBlock(hashMarker)(patched); err != nil || got != original {
+		t.Errorf("removeBlock = %q, %v, want %q", got, err, original)
+	}
+	if got, _ := removeBlock(hashMarker)(original); got != original {
+		t.Errorf("removeBlock changed a file without block: %q", got)
+	}
+	broken := strings.Replace(patched, "# fluffy:end\n", "", 1)
+	if _, err := removeBlock(hashMarker)(broken); err == nil {
+		t.Error("removed a block without end marker")
+	}
+
+	for _, fixture := range []string{"ios.pbxproj", "macos.pbxproj"} {
+		original := readFixture(t, fixture)
+		patched, err := xcodeHook("echo one\n")(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := removeXcodePhase(patched); err != nil || got != original {
+			t.Errorf("%s: removeXcodePhase did not restore the file (%v)", fixture, err)
+		}
+	}
+}
+
+func TestRemoveOldLibraries(t *testing.T) {
+	root := t.TempDir()
+	jniLibs := filepath.Join(root, "android", "app", "src", "main", "jniLibs")
+	own := filepath.Join(jniLibs, "x86_64", "libother.so")
+	for _, file := range []string{filepath.Join(jniLibs, "arm64-v8a", "libgolang.so"), filepath.Join(jniLibs, "x86_64", "libgolang.so"), own} {
+		writeFile(file, []byte("lib"))
+	}
+	if err := removeOldLibraries(root); err != nil {
+		t.Fatal(err)
+	}
+	if libs, _ := filepath.Glob(filepath.Join(jniLibs, "*", "libgolang.so")); len(libs) > 0 {
+		t.Errorf("not removed: %v", libs)
+	}
+	if _, err := os.Stat(filepath.Join(jniLibs, "arm64-v8a")); !os.IsNotExist(err) {
+		t.Error("empty ABI directory kept")
+	}
+	if _, err := os.Stat(own); err != nil {
+		t.Error("removed a library that is not fluffy's")
+	}
+}
+
+// The hook has its own copy of the message.
+func TestHookNotFound(t *testing.T) {
+	hook, err := templates.ReadFile("_templates/layer/hook/build.dart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.ReplaceAll(string(hook), "'\n    r'", ""); !strings.Contains(joined, notFound) {
+		t.Error("golang/hook/build.dart does not show the notFound message")
+	}
+}
+
+// golang/pubspec.yaml belongs to the hook package, fluffy commands started
+// in golang/ (go generate) work on the project.
+func TestFindProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	writeFile(filepath.Join(root, "pubspec.yaml"), []byte("name: demo\n"))
+	writeFile(filepath.Join(root, "golang", "pubspec.yaml"), []byte("# comment\nname: "+hookPackage+"\n"))
+	writeFile(filepath.Join(root, "golang", "todo", "todo.go"), []byte("package todo\n"))
+	t.Chdir(filepath.Join(root, "golang", "todo"))
+	got, err := findProjectRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := filepath.EvalSymlinks(root); got != root && got != want {
+		t.Errorf("findProjectRoot = %s, want %s", got, root)
+	}
+}
+
 func TestPatchIndexHTML(t *testing.T) {
 	original := readFixture(t, "index.html")
 
@@ -185,8 +262,8 @@ func TestFvmFlag(t *testing.T) {
 }
 
 func TestParseArchs(t *testing.T) {
-	got, err := parseArchs("arm64 x86_64,armeabi-v7a")
-	if err != nil || strings.Join(got, " ") != "arm64 amd64 arm" {
+	got, err := parseArchs("arm64 x86_64,armeabi-v7a ia32 x64")
+	if err != nil || strings.Join(got, " ") != "arm64 amd64 arm 386 amd64" {
 		t.Fatalf("parseArchs = %v, %v", got, err)
 	}
 	if _, err := parseArchs("sparc"); err == nil {
@@ -275,6 +352,12 @@ func TestSyncLayer(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	for _, owned := range []string{"pubspec.yaml", filepath.Join("hook", "build.dart")} {
+		if _, err := os.Stat(filepath.Join(root, "golang", owned)); err != nil {
+			t.Errorf("the hook package lacks %s", owned)
+		}
+	}
+
 	layerTest := filepath.Join(root, "golang", "fluffy", "fluffy_test.go")
 	if _, err := os.Stat(layerTest); !os.IsNotExist(err) {
 		t.Error("the layer's tests were copied into the project")
@@ -282,11 +365,15 @@ func TestSyncLayer(t *testing.T) {
 
 	changed := filepath.Join(root, "golang", "fluffy", "bridge.go")
 	stale := filepath.Join(root, "lib", "golang", "src", "old.dart")
+	staleHook := filepath.Join(root, "golang", "hook", "old.dart")
 	user := filepath.Join(root, "golang", "api.go")
+	userFile := filepath.Join(root, "golang", "notes.txt")
 	original, _ := os.ReadFile(changed)
 	os.WriteFile(changed, []byte("package fluffy\n"), 0o644)
 	os.WriteFile(stale, []byte("// removed from the templates\n"), 0o644)
+	os.WriteFile(staleHook, []byte("// removed from the templates\n"), 0o644)
 	os.WriteFile(user, []byte("package main\n"), 0o644)
+	os.WriteFile(userFile, []byte("mine\n"), 0o644)
 
 	if err := syncLayer(root, data); err != nil {
 		t.Fatal(err)
@@ -294,11 +381,16 @@ func TestSyncLayer(t *testing.T) {
 	if got, _ := os.ReadFile(changed); string(got) != string(original) {
 		t.Error("changed layer file was not replaced")
 	}
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Error("file missing from the templates was not removed")
+	for _, file := range []string{stale, staleHook} {
+		if _, err := os.Stat(file); !os.IsNotExist(err) {
+			t.Errorf("%s is missing from the templates and was not removed", file)
+		}
 	}
 	if got, _ := os.ReadFile(user); string(got) != "package main\n" {
 		t.Error("user file was changed")
+	}
+	if _, err := os.Stat(userFile); err != nil {
+		t.Error("user file next to the hook package was removed")
 	}
 }
 

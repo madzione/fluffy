@@ -52,7 +52,6 @@ app.*.map.json
 
 # fluffy:begin
 # Go libraries built by fluffy
-/android/app/src/main/jniLibs/*/libgolang.so
 /web/golang.wasm
 /web/wasm_exec.js
 # fluffy:end

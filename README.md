@@ -4,7 +4,7 @@
 
 ![](./screenshot.png)
 
-Fluffy is a CLI tool, still in development, that integrates Go code into any Flutter (Dart) project. On native targets the Go code is compiled to a C library and called over `dart:ffi`; on the web it runs as WebAssembly. Fluffy hooks into the Flutter build of every native platform, so `flutter run` and `flutter build` compile the Go code automatically (on the web `fluffy run` and `fluffy build` do it), and it generates a typed Dart API from your plain Go functions, services and structs. Underneath, a small message layer carries requests, events and streams in both directions, so Go can call back into Dart as well.
+Fluffy is a CLI tool, still in development, that integrates Go code into any Flutter (Dart) project. On native targets the Go code is compiled to a C library and called over `dart:ffi`; on the web it runs as WebAssembly. On native platforms a Flutter build hook compiles the Go code, so `flutter run`, `flutter build` and `flutter test` build it automatically (on the web `fluffy run` and `fluffy build` do it), and it generates a typed Dart API from your plain Go functions, services and structs. Underneath, a small message layer carries requests, events and streams in both directions, so Go can call back into Dart as well.
 
 ## Requirements
 - Flutter 3.16 or newer
@@ -41,13 +41,13 @@ First, you need to install a small utility tool. Unfortunately, it is required t
 go install github.com/madzione/fluffy@latest
 ```
 
-The platform build hooks call `fluffy` during every build, so the install directory (usually `$(go env GOPATH)/bin`, e.g. `~/go/bin`) has to be on your `PATH`. A copy of the binary inside the project is not enough. When the build can't find `fluffy`, it stops with a message saying so. Check it with:
+The build hook calls `fluffy` during Flutter builds, so the install directory (usually `$(go env GOPATH)/bin`, e.g. `~/go/bin`) has to be on your `PATH`. A copy of the binary inside the project is not enough. When the build can't find `fluffy`, it stops with a message saying so. Check it with:
 
 ```sh
 fluffy --version
 ```
 
-Besides Flutter and Go you need what cgo needs for your targets:
+You need Flutter 3.38 or newer (build hooks) and Go, plus what cgo needs for your targets:
 
 | Target  | Extra requirement |
 |---------|-------------------|
@@ -93,6 +93,8 @@ my_app/
 │   ├── api.go               your Go code: functions marked with //fluffy:export
 │   ├── main.go              starts the layer on the web, //go:generate fluffy generate
 │   ├── fluffy_api.go        generated: registers the exported functions (managed by fluffy)
+│   ├── pubspec.yaml         the fluffy_golang Dart package (managed by fluffy)
+│   ├── hook/build.dart      its Flutter build hook: builds the Go library (managed by fluffy)
 │   └── fluffy/              the communication layer (managed by fluffy)
 │       ├── bridge.go        message protocol, Start
 │       ├── emitter.go       Emit, Request
@@ -106,7 +108,7 @@ my_app/
     └── src/                 the communication layer (managed by fluffy)
 ```
 
-It also patches the build files of every platform the project has (see [Build hooks](#build-hooks)), appends the generated libraries to `.gitignore`, runs `fluffy generate` and runs `flutter pub add ffi`.
+It also adds `golang/` to the app as the path dependency `fluffy_golang`, whose build hook builds the Go library (see [Build hooks](#build-hooks)), patches the iOS and web build files, appends the generated web libraries to `.gitignore`, runs `fluffy generate` and runs `flutter pub add` for `ffi` and `fluffy_golang`.
 
 ### 3. Look at the demo
 
@@ -118,7 +120,7 @@ It also patches the build files of every platform the project has (see [Build ho
 
 All three are plain Go functions in `golang/api.go`, their Dart functions are generated into `lib/golang/api.g.dart`.
 
-`test/widget_test.dart` is replaced too. It tests the demo against a fake Go side, so `flutter test` works without building the Go library.
+`test/widget_test.dart` is replaced too. It tests the demo against a fake Go side, so the test never loads the Go library. `flutter test` still runs the build hook, so it needs Go and `fluffy` on `PATH` like any other build (see [Testing](#testing)).
 
 `fluffy init` in an existing project leaves `lib/main.dart` alone. Call Go from anywhere in the app with:
 
@@ -136,7 +138,7 @@ fluffy run -d linux        # or windows, macos, <android device id>, ...
 fluffy run -d chrome       # web
 ```
 
-`fluffy run` first runs `fluffy generate`, so the Dart API matches the Go code. On native targets the Go library is compiled by the platform build hook, so a plain `flutter run` works just as well once the API is generated. Web has no build hook in Flutter: `fluffy run` builds `web/golang.wasm` first when the device may be a browser (`-d chrome`, `-d edge`, `-d web-server`, or no `-d` at all in a project with a `web/` folder). For a release build run `fluffy build`, which generates first, builds `web/golang.wasm` for web (stripped, unless `--debug` or `--profile`) and then runs `flutter build` with the same arguments:
+`fluffy run` first runs `fluffy generate`, so the Dart API matches the Go code. On native targets the Go library is compiled by the build hook, so a plain `flutter run` works just as well once the API is generated. Web has no build hook in Flutter: `fluffy run` builds `web/golang.wasm` first when the device may be a browser (`-d chrome`, `-d edge`, `-d web-server`, or no `-d` at all in a project with a `web/` folder). For a release build run `fluffy build`, which generates first, builds `web/golang.wasm` for web (stripped, unless `--debug` or `--profile`) and then runs `flutter build` with the same arguments:
 
 ```sh
 fluffy build web
@@ -163,15 +165,15 @@ Your files (`golang/api.go`, `golang/main.go`, `golang/go.mod`, `lib/golang/api.
 
 The generated files `golang/fluffy_api.go` and `lib/golang/api.g.dart` belong to fluffy. `fluffy generate` overwrites them, so don't edit them. Commit them, so the Dart code compiles right after a checkout, e.g. for `flutter analyze` in CI.
 
-The communication layer in `golang/fluffy/` and `lib/golang/src/` belongs to fluffy. `fluffy init` and `fluffy update` replace these two directories with the version of the installed fluffy:
+The communication layer in `golang/fluffy/` and `lib/golang/src/`, and the build hook package (`golang/pubspec.yaml`, `golang/hook/`), belong to fluffy. `fluffy init` and `fluffy update` replace them with the version of the installed fluffy:
 
 - Changed files are overwritten.
 - New files are added.
-- Files the current version no longer has are deleted.
+- Files the current version no longer has are deleted (in `golang/fluffy/`, `golang/hook/` and `lib/golang/src/`).
 
 So don't edit or add files there; your changes would be lost on the next update.
 
-After upgrading fluffy, run `fluffy update` to bring the communication layer, the build hooks and the generated API up to date without touching your code. Projects set up before the generator existed get a hint that `lib/golang/api.dart` should `export 'api.g.dart';`.
+After upgrading fluffy, run `fluffy update` to bring the communication layer, the build hooks and the generated API up to date without touching your code. Projects set up before the generator existed get a hint that `lib/golang/api.dart` should `export 'api.g.dart';`. Projects from before the Flutter build hook get it added, and the CMake, Gradle and macOS Xcode patches of older versions are removed (see [Build hooks](#build-hooks)).
 
 ## Examples
 
@@ -214,7 +216,7 @@ fluffy generate --check    # fail if they are out of date, e.g. in CI
 fluffy generate --watch    # generate again whenever a Go file, go.mod or go.work changes
 ```
 
-It runs automatically in `fluffy run`, `fluffy build`, `fluffy init` and `fluffy update`, and through `go generate` (`golang/main.go` has `//go:generate fluffy generate`). The native build hooks don't run it: Flutter compiles the Dart code alongside them, so a Dart file written there may not be picked up. With a plain `flutter run`, keep `fluffy generate --watch` running. When the Go build in a hook fails because `golang/fluffy_api.go` still registers a function you removed or renamed, the hook writes the Go file again and retries; run `fluffy generate` for the Dart side.
+It runs automatically in `fluffy run`, `fluffy build`, `fluffy init` and `fluffy update`, and through `go generate` (`golang/main.go` has `//go:generate fluffy generate`). The build hook doesn't run it, a hook may only write its own output directory. It runs `fluffy generate --check` instead and fails the build with "run fluffy generate" when the generated files are out of date. With a plain `flutter run`, keep `fluffy generate --watch` running. When `fluffy lib` by hand (or the iOS build phase) fails because `golang/fluffy_api.go` still registers a function you removed or renamed, it writes the Go file again and retries; run `fluffy generate` for the Dart side.
 
 ### Functions
 
@@ -539,6 +541,8 @@ go.receiver.handle('Add', (data) {
 go.receiver.stream('Clock', (_) => Stream.value('12:00:00'));
 ```
 
+`flutter test` runs the build hook for the host, like `flutter run`, so the first run needs Go and `fluffy` on `PATH` even when every test uses `Bridge.fake()` (later runs reuse the library until the Go code changes). In exchange, unit tests can call the real Go library: a test that uses the generated API without `Bridge.fake()` connects to it, e.g. `expect(await golang.add(1, 2), 3)` in a plain `test()`.
+
 **Go:** exported functions and services are plain Go and can be tested directly. The layer itself is tested in the fluffy repository, so `go test ./...` in `golang/` only runs your tests.
 
 ### Under the hood
@@ -577,29 +581,32 @@ fluffy <command> [arguments]
 | Command | Description |
 |---------|-------------|
 | `fluffy create [--fvm <version>] [--patch-gtk] [flutter create flags] <dir>` | Runs `flutter create` with all given flags, then `fluffy init` in `<dir>` (passing `--patch-gtk` on), and replaces the counter app and its test with the Go demo. The directory must be the last argument. With FVM installed, pins the new project to `--fvm`, the nearest `.fvmrc` or the FVM global version (see [Create a runnable app](#2-create-a-runnable-app)). |
-| `fluffy init [--patch-gtk]` | Sets up the Flutter project in the current directory: scaffolds `golang/` and `lib/golang/`, patches the build hooks, updates `.gitignore`, generates the API and runs `flutter pub add ffi` (if `ffi` is not a dependency yet). Your existing files are kept, the communication layer is replaced. `--patch-gtk` also applies the [Linux window decoration](#linux-window-decoration) patch. |
-| `fluffy update [--patch-gtk]` | Replaces the communication layer (`golang/fluffy/`, `lib/golang/src/`) with the installed version, re-applies the build hooks (and the GTK patch, if the project has it or `--patch-gtk` is given) and generates the API again. Your code is kept. Works from any subdirectory of the project. |
+| `fluffy init [--patch-gtk]` | Sets up the Flutter project in the current directory: scaffolds `golang/` and `lib/golang/`, adds the build hook package, patches the iOS and web build files, updates `.gitignore`, generates the API and runs `flutter pub add` for `ffi` and `fluffy_golang` (those not yet dependencies). Your existing files are kept, the communication layer is replaced. `--patch-gtk` also applies the [Linux window decoration](#linux-window-decoration) patch. |
+| `fluffy update [--patch-gtk]` | Replaces the communication layer (`golang/fluffy/`, `lib/golang/src/`) and the build hook package (`golang/pubspec.yaml`, `golang/hook/`) with the installed version, adds the `fluffy_golang` dependency if missing, re-applies the build file patches (and the GTK patch, if the project has it or `--patch-gtk` is given), removes those of older versions and generates the API again. Your code is kept. Works from any subdirectory of the project. |
 | `fluffy generate [--check \| --watch]` | Writes `lib/golang/api.g.dart` and `golang/fluffy_api.go` from the Go code (see [Generated API](#generated-api)). `--check` only reports whether they are out of date and fails if so, `--watch` generates again on every change until stopped. Works from any subdirectory of the project. |
 | `fluffy run [flutter run flags]` | Runs `fluffy generate`, builds the web library when the device may be a browser, then runs `flutter run` with all flags. |
-| `fluffy build <target> [flutter build flags]` | Runs `fluffy generate`, builds `web/golang.wasm` for `web`, then runs `flutter build <target>` with all flags (`apk`, `appbundle`, `ipa`, `linux`, `web`, ...). Native targets build the Go library in their build hooks. |
-| `fluffy lib <target> [flags]` | Builds **only** the Go library, see [`fluffy lib` flags](#fluffy-lib-flags). `<target>` is one of `linux`, `windows`, `macos`, `android`, `ios`, `web`. The build hooks call it. |
+| `fluffy build <target> [flutter build flags]` | Runs `fluffy generate`, builds `web/golang.wasm` for `web`, then runs `flutter build <target>` with all flags (`apk`, `appbundle`, `ipa`, `linux`, `web`, ...). Native targets build the Go library in the build hook. |
+| `fluffy lib <target> [flags]` | Builds **only** the Go library, see [`fluffy lib` flags](#fluffy-lib-flags). `<target>` is one of `linux`, `windows`, `macos`, `android`, `ios`, `web`. The build hook and the iOS build phase call it. |
 | `fluffy --version` | Prints the fluffy and Flutter versions. |
 | `fluffy help`, `-h`, `--help` | Prints the usage. |
 | `fluffy <anything else>` | Passed through to `flutter` unchanged, without generating, e.g. `fluffy pub get`, `fluffy analyze`, `fluffy test`. |
 
 Every command that calls Flutter uses `fvm flutter` instead when the project has a `.fvmrc` and `fvm` is installed.
 
-Older fluffy versions built only the Go library with `fluffy build <target>`. Build hooks that still call it that way are recognized and keep working, with a hint to run `fluffy update`.
+Older fluffy versions built only the Go library with `fluffy build <target>`. Build file patches that still call it that way are recognized and keep working, with a hint to run `fluffy update`.
 
 ### `fluffy lib` flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o <dir>` | per target, see below | Output directory for the library. |
-| `--arch <list>` | host architecture; `arm64 arm amd64` on android; `arm64` on ios | Space or comma separated architectures. Go, Xcode and Android names are accepted: `amd64`/`x86_64`/`x64`, `arm64`/`aarch64`/`arm64-v8a`, `arm`/`armv7`/`armeabi-v7a`, `386`/`x86`/`i386`. Linux and Windows take exactly one, macOS and iOS merge several into a universal binary with `lipo`. |
+| `--arch <list>` | host architecture; `arm64 arm amd64` on android; `arm64` on ios | Space or comma separated architectures. Go, Xcode, Android and Dart names are accepted: `amd64`/`x86_64`/`x64`, `arm64`/`aarch64`/`arm64-v8a`, `arm`/`armv7`/`armeabi-v7a`, `386`/`x86`/`i386`/`ia32`. Linux and Windows take exactly one, macOS and iOS merge several into a universal binary with `lipo`. |
 | `--sdk <name>` | `iphoneos` | iOS only: `iphoneos` (device) or `iphonesimulator`. |
-| `--android-api <level>` | `21` | Android only: API level of the NDK compiler (`<triple><level>-clang`). |
-| `--ndk-version <version>` | the newest installed | Android only: the NDK in the Android SDK to use. The Gradle hook passes the app's `android.ndkVersion`. |
+| `--android-api <level>` | `21` | Android only: API level of the NDK compiler. The build hook passes the app's `minSdk`. |
+| `--ndk-version <version>` | the newest installed | Android only: the NDK in the Android SDK to use, unless `--cc` is given. |
+| `--cc <path>` | `CC`, else the platform's default | C compiler for cgo. On Android a plain NDK `clang`, fluffy adds `--target=<triple><api level>`; the build hook passes the compiler Flutter uses (not on Windows, where that is MSVC). |
+| `--min-os <version>` | macOS: Go's default; iOS: `IPHONEOS_DEPLOYMENT_TARGET`, else `13.0` | macOS and iOS: minimum OS version. |
+| `--deps <file>` | none | Writes every input of the build to `<file>`, one absolute path per line: the files and directories of the packages of your own modules (main module, `go.work`, local `replace`), their `go.mod`/`go.sum`, `go.work`, and the `go` and `fluffy` binaries. The build hook hands them to Flutter, which runs the hook again only when one of them changes. |
 | `--strip` | off | Leaves out the symbol table and debug info (`-ldflags="-s -w"`) for smaller libraries. `fluffy build web` uses it unless `--debug` or `--profile` is given, `fluffy run` with `--release`. |
 
 | Target | Output (default `-o`) | Notes |
@@ -627,24 +634,43 @@ fluffy build apk --release                   # generate, then flutter build apk
 | Variable | Used for |
 |----------|----------|
 | `ANDROID_NDK_HOME`, `ANDROID_NDK_ROOT`, `ANDROID_NDK` | Path to the NDK. Without them, fluffy uses the NDK of `--ndk-version`, else the newest NDK, in the Android SDK, found via `sdk.dir` in `android/local.properties`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` or the default SDK locations. |
-| `IPHONEOS_DEPLOYMENT_TARGET` | Minimum iOS version for the Go archive (default `13.0`, set by Xcode during builds). |
-| `CC` | C compiler for cgo, overrides the MinGW default when cross-compiling for Windows. |
+| `IPHONEOS_DEPLOYMENT_TARGET` | Minimum iOS version for the Go archive unless `--min-os` is given (default `13.0`, set by Xcode during builds). |
+| `CC` | C compiler for cgo unless `--cc` is given, overrides the MinGW default when cross-compiling for Windows. |
+
+Flutter starts build hooks with only some of your environment variables: `PATH`, `HOME`, `GOPATH`, the Android SDK and NDK variables and a few others. `GOFLAGS`, `GOPRIVATE`, `GOPROXY`, `GOTOOLCHAIN`, `CGO_*`, `CC` and `XDG_*` don't reach the Go build in the hook. Set Go settings with `go env -w` (e.g. `go env -w GOPRIVATE=example.com/*`), which the hook still finds through `HOME`, unless you changed `XDG_CONFIG_HOME`.
 
 ### Build hooks
 
-`fluffy init` and `fluffy update` patch the files below, if the platform folder exists. Every change is wrapped in `fluffy:begin` / `fluffy:end` markers, so running them again replaces the block instead of duplicating it. If you deleted an end marker by hand, they stop with an error instead of guessing where the block ends.
+`golang/` is a small Dart package, `fluffy_golang`, with a [Flutter build hook](https://docs.flutter.dev/platform-integration/bind-native-code) in `golang/hook/build.dart`. The app depends on it with a path dependency:
+
+```yaml
+dependencies:
+  fluffy_golang:
+    path: golang
+```
+
+Flutter runs the hook in `flutter run`, `flutter build` and `flutter test` for every native target and architecture it builds. The hook:
+
+1. runs `fluffy generate --check` and fails with "run fluffy generate" when `lib/golang/api.g.dart` or `golang/fluffy_api.go` is out of date,
+2. runs `fluffy lib <platform>` for the architecture, with the C compiler, Android API level (the app's `minSdk`) and minimum macOS version Flutter passes, stripped for profile and release builds on Linux and Windows,
+3. hands the library to Flutter as the code asset `package:fluffy_golang/golang`. Flutter bundles it: into `lib/` next to the Linux executable, next to the Windows `.exe`, per ABI into the APK, and as a signed framework into the macOS app (merging the architectures with `lipo`, and writing a dSYM for release builds).
+
+Dart reaches the library through `@Native` functions in `lib/golang/src/transport_ffi.dart`, which Flutter resolves to the bundled library. The library is only loaded on the first call, so tests with `Bridge.fake()` never load it.
+
+Flutter runs the hook again only when one of the files `fluffy lib --deps` lists changed (the Go files, `go.mod`, `go.work`, `go` or `fluffy` itself), otherwise it reuses the library.
+
+`pubspec.yaml` and `hook/` belong to fluffy, `fluffy update` overwrites them. The Go tool ignores them, they hold no `.go` files.
+
+iOS keeps linking Go statically: Go can't build a shared library for iOS, and Flutter only bundles shared ones. There the hook only declares that the library is found in the app itself, and `fluffy init` and `fluffy update` patch the Xcode project. Every change is wrapped in `fluffy:begin` / `fluffy:end` markers, so running them again replaces the block instead of duplicating it. If you deleted an end marker by hand, they stop with an error instead of guessing where the block ends.
 
 | Platform | File | What it does |
 |----------|------|--------------|
-| linux / windows | `<platform>/CMakeLists.txt` | Custom target that runs `fluffy lib <platform>` for the architecture Flutter builds (`FLUTTER_TARGET_PLATFORM`) and installs the library into the bundle's `lib` dir. |
-| android | `android/app/build.gradle(.kts)` | `fluffyBuildGo` Exec task before `preBuild`, runs `fluffy lib android` for the ABIs Flutter builds (only the device's on `flutter run`) with the app's `ndkVersion`. |
-| macos | `macos/Runner.xcodeproj/project.pbxproj` | First build phase: `fluffy lib macos` into the app's `Contents/Frameworks` and codesigns it. |
 | ios | `ios/Runner.xcodeproj/project.pbxproj`, `ios/Flutter/{Debug,Release}.xcconfig` | First build phase: `fluffy lib ios` for the current SDK and archs; linker flags to `-force_load` the archive and keep its symbols. |
 | web | `web/index.html` | Starts the Go WebAssembly module and waits until it serves before loading `flutter_bootstrap.js`. |
 
-Each hook first checks that `fluffy` is on `PATH` and otherwise fails the build with an install hint: CMake at configure time, Gradle before `fluffyBuildGo` runs, and the Xcode build phase as an `error:` in the issue list. Run `fluffy update` to add this check to projects set up with an older fluffy.
+The build hook and the Xcode build phase first look for `fluffy` and otherwise fail the build with an install hint, the Xcode build phase as an `error:` in the issue list. Builds started from the Xcode UI get a minimal `PATH`; both add `~/go/bin`, `/usr/local/go/bin`, `/opt/homebrew/bin` and `/usr/local/bin` (the hook also `$GOPATH/bin`) to find `go` and `fluffy`.
 
-Xcode builds started from the IDE get a minimal `PATH`; the build phase adds `~/go/bin`, `/usr/local/go/bin`, `/opt/homebrew/bin` and `/usr/local/bin` to find `go` and `fluffy`.
+Older fluffy versions built the library from a CMake target (Linux, Windows), a Gradle task (Android) and an Xcode build phase (macOS). `fluffy update` removes these blocks, the libraries the Gradle task wrote into `android/app/src/main/jniLibs/` and their `.gitignore` entry.
 
 ### Linux window decoration
 

@@ -47,20 +47,3 @@ kotlin {
 flutter {
     source = "../.."
 }
-
-// fluffy:begin
-// Builds the Go library in golang/ into src/main/jniLibs before every build,
-// for the ABIs flutter builds (only the device's on flutter run) and with the
-// app's NDK.
-val fluffyBuildGo = tasks.register<Exec>("fluffyBuildGo") {
-    workingDir = rootDir.parentFile
-    val abis = (project.findProperty("target-platform") ?: project.findProperty("android.injected.build.abi") ?: "").toString()
-    commandLine("fluffy", "lib", "android", "--arch", abis.replace("android-", ""), "--ndk-version", android.ndkVersion ?: "")
-    doFirst {
-        val onPath = System.getenv("PATH").orEmpty().split(File.pathSeparator)
-            .any { File(it, "fluffy").canExecute() || File(it, "fluffy.exe").canExecute() }
-        if (!onPath) throw GradleException("fluffy was not found on PATH. The Go library of this app is built by the fluffy CLI during the Flutter build. Install it with \"go install github.com/madzione/fluffy@latest\" and make sure its directory (usually \$(go env GOPATH)/bin, e.g. ~/go/bin) is on PATH, then build again.")
-    }
-}
-tasks.named("preBuild") { dependsOn(fluffyBuildGo) }
-// fluffy:end

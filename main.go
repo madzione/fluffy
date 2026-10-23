@@ -32,10 +32,11 @@ Usage:
   fluffy --version                             Print fluffy and flutter versions
   fluffy <anything else>                       Passed through to flutter unchanged, without generating
 
-Native targets build the Go library in the platform build hooks, so plain
-"flutter run" and "flutter build" work too once the API is generated: run
-fluffy generate yourself, or keep "fluffy generate --watch" running. Web has
-no hook: use "fluffy run" and "fluffy build web", or "fluffy lib web" first.
+Native targets build the Go library in a Flutter build hook (golang/hook/build.dart),
+so plain "flutter run", "flutter build" and "flutter test" work too once the API is
+generated: run fluffy generate yourself, or keep "fluffy generate --watch" running.
+The hook fails when lib/golang/api.g.dart is out of date. Web has no hook: use
+"fluffy run" and "fluffy build web", or "fluffy lib web" first.
 
 --patch-gtk makes the Linux runner use the GTK header bar only on GNOME, so
 other desktops (e.g. KDE on Wayland) draw their native title bar instead of
@@ -47,6 +48,10 @@ Lib flags:
   --sdk <name>           iOS SDK: iphoneos or iphonesimulator (default: iphoneos)
   --android-api <level>  Android API level of the NDK compiler (default: 21)
   --ndk-version <ver>    Android NDK version in the SDK (default: the newest installed)
+  --cc <path>            C compiler for cgo; on android the NDK's plain clang, which replaces
+                         the NDK search
+  --min-os <version>     Minimum macOS or iOS version (default on ios: $IPHONEOS_DEPLOYMENT_TARGET or 13.0)
+  --deps <file>          Write the files the build depends on to file, one per line
   --strip                Leave out the symbol table and debug info, for smaller release builds
 `
 

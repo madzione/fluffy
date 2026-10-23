@@ -208,7 +208,6 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 33CC10FB2044A3C60003C045 /* Build configuration list for PBXNativeTarget "Runner" */;
 			buildPhases = (
-				F1FF1E000000000000000001 /* Build Go library (fluffy) */,
 				33CC10E92044A3C60003C045 /* Sources */,
 				33CC10EA2044A3C60003C045 /* Frameworks */,
 				33CC10EB2044A3C60003C045 /* Resources */,
@@ -302,21 +301,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		F1FF1E000000000000000001 /* Build Go library (fluffy) */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-			);
-			name = "Build Go library (fluffy)";
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "set -e\nexport PATH=\"$PATH:$HOME/go/bin:/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin\"\nif ! command -v fluffy >/dev/null 2>&1; then\n  echo 'error: fluffy was not found on PATH. The Go library of this app is built by the fluffy CLI during the Flutter build. Install it with \"go install github.com/madzione/fluffy@latest\" and make sure its directory (usually $(go env GOPATH)/bin, e.g. ~/go/bin) is on PATH, then build again.'\n  exit 1\nfi\ncd \"$PROJECT_DIR/..\"\nfluffy lib macos --arch \"$ARCHS\" -o \"$BUILT_PRODUCTS_DIR/$FRAMEWORKS_FOLDER_PATH\"\ncodesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY:--}\" \"$BUILT_PRODUCTS_DIR/$FRAMEWORKS_FOLDER_PATH/libgolang.dylib\"\n";
-		};
 		3399D490228B24CF009A79C7 /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;

@@ -24,11 +24,14 @@ func isGoTarget(target string) bool {
 // a temporary directory so only the library itself (no cgo header) lands in
 // the output directory.
 type builder struct {
-	root       string   // Flutter project root
-	out        string   // output directory, empty for the target's default
-	archs      []string // GOARCH values, empty for the target's default
-	strip      bool     // leave out the symbol table and DWARF
-	ndkVersion string   // Android NDK in the SDK, empty for the newest
+	root       string          // Flutter project root
+	out        string          // output directory, empty for the target's default
+	archs      []string        // GOARCH values, empty for the target's default
+	strip      bool            // leave out the symbol table and DWARF
+	ndkVersion string          // Android NDK in the SDK, empty for the newest
+	cc         string          // C compiler for cgo, empty for the default
+	minOS      string          // minimum macOS or iOS version, empty for the default
+	deps       map[string]bool // inputs of the builds so far, nil when not collected
 }
 
 // buildCommand is fluffy build: flutter build after generating the API. Web
@@ -96,6 +99,9 @@ func libCommand(args []string) error {
 	api := flags.Int("android-api", 21, "Android API level to compile against")
 	ndkVersion := flags.String("ndk-version", "", "Android NDK version in the SDK to use (default: the newest)")
 	strip := flags.Bool("strip", false, "leave out the symbol table and debug info (-ldflags=\"-s -w\")")
+	deps := flags.String("deps", "", "write the files the build depends on to this file, one per line")
+	cc := flags.String("cc", "", "C compiler for cgo, on android a plain clang of the NDK")
+	minOS := flags.String("min-os", "", "minimum macOS or iOS version")
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -114,7 +120,10 @@ func libCommand(args []string) error {
 		return fmt.Errorf("no golang/ directory in %s, run fluffy init first", root)
 	}
 
-	b := builder{root: root, strip: *strip, ndkVersion: *ndkVersion}
+	b := builder{root: root, strip: *strip, ndkVersion: *ndkVersion, cc: *cc, minOS: *minOS}
+	if *deps != "" {
+		b.deps = map[string]bool{}
+	}
 	if *out != "" {
 		if b.out, err = filepath.Abs(*out); err != nil {
 			return err
@@ -149,7 +158,10 @@ func libCommand(args []string) error {
 			"Run fluffy generate to update lib/golang/api.g.dart too.")
 		err = build()
 	}
-	return err
+	if err != nil || *deps == "" {
+		return err
+	}
+	return b.writeDeps(*deps)
 }
 
 // parseArchs turns a space or comma separated list of Go, Xcode or Android
@@ -164,7 +176,7 @@ func parseArchs(list string) ([]string, error) {
 			archs = append(archs, "arm64")
 		case "arm", "armv7", "armeabi-v7a":
 			archs = append(archs, "arm")
-		case "386", "x86", "i386":
+		case "386", "x86", "i386", "ia32":
 			archs = append(archs, "386")
 		default:
 			return nil, fmt.Errorf("unknown architecture %q", name)
@@ -195,7 +207,9 @@ func (b builder) desktop(goos, lib string) error {
 	arch := archs[0]
 
 	env := []string{"GOOS=" + goos, "GOARCH=" + arch, "CGO_ENABLED=1"}
-	if goos == "windows" && runtime.GOOS != "windows" && os.Getenv("CC") == "" {
+	if b.cc != "" {
+		env = append(env, "CC="+b.cc)
+	} else if goos == "windows" && runtime.GOOS != "windows" && os.Getenv("CC") == "" {
 		// Cross-compiling needs a MinGW toolchain for cgo.
 		cc := map[string]string{"amd64": "x86_64-w64-mingw32-gcc", "arm64": "aarch64-w64-mingw32-gcc", "386": "i686-w64-mingw32-gcc"}[arch]
 		env = append(env, "CC="+cc)
@@ -213,9 +227,20 @@ func (b builder) macos() error {
 	}
 	defer os.RemoveAll(tmp)
 
+	// Room in the header for the install name Flutter gives the library.
+	flags := "-Wl,-headerpad_max_install_names"
+	if b.minOS != "" {
+		flags += " -mmacosx-version-min=" + b.minOS
+	}
 	for _, arch := range archs {
 		part := filepath.Join(tmp, arch, "libgolang.dylib")
-		env := []string{"GOOS=darwin", "GOARCH=" + arch, "CGO_ENABLED=1"}
+		env := []string{"GOOS=darwin", "GOARCH=" + arch, "CGO_ENABLED=1", "CGO_LDFLAGS=" + cgoFlags("CGO_LDFLAGS", flags)}
+		if b.minOS != "" {
+			env = append(env, "CGO_CFLAGS="+cgoFlags("CGO_CFLAGS", "-mmacosx-version-min="+b.minOS))
+		}
+		if b.cc != "" {
+			env = append(env, "CC="+b.cc)
+		}
 		if err := b.goBuild(env, "c-shared", part); err != nil {
 			return err
 		}
@@ -233,11 +258,16 @@ func (b builder) ios(sdk string) error {
 	if err != nil {
 		return fmt.Errorf("iOS builds need Xcode: %w", err)
 	}
-	clang, err := output("xcrun", "--sdk", sdk, "--find", "clang")
-	if err != nil {
-		return err
+	clang := b.cc
+	if clang == "" {
+		if clang, err = output("xcrun", "--sdk", sdk, "--find", "clang"); err != nil {
+			return err
+		}
 	}
-	minVersion := os.Getenv("IPHONEOS_DEPLOYMENT_TARGET")
+	minVersion := b.minOS
+	if minVersion == "" {
+		minVersion = os.Getenv("IPHONEOS_DEPLOYMENT_TARGET")
+	}
 	if minVersion == "" {
 		minVersion = "13.0"
 	}
@@ -261,7 +291,8 @@ func (b builder) ios(sdk string) error {
 		flags := "-isysroot " + sdkPath + " -target " + triple
 
 		part := filepath.Join(tmp, arch, "libgolang.a")
-		env := []string{"GOOS=ios", "GOARCH=" + arch, "CGO_ENABLED=1", "CC=" + clang, "CGO_CFLAGS=" + flags, "CGO_LDFLAGS=" + flags}
+		env := []string{"GOOS=ios", "GOARCH=" + arch, "CGO_ENABLED=1", "CC=" + clang,
+			"CGO_CFLAGS=" + cgoFlags("CGO_CFLAGS", flags), "CGO_LDFLAGS=" + cgoFlags("CGO_LDFLAGS", flags)}
 		if err := b.goBuild(env, "c-archive", part); err != nil {
 			return err
 		}
@@ -278,14 +309,21 @@ var androidABIs = map[string]struct{ abi, triple string }{
 	"386":   {"x86", "i686-linux-android"},
 }
 
+// android builds into <out>/<ABI>/libgolang.so. Without --cc it uses the
+// NDK's per-API compiler wrappers, with --cc (the NDK clang a Flutter build
+// hook gets) it passes the target and API level itself.
 func (b builder) android(api int) error {
-	ndk, err := findNDK(b.root, b.ndkVersion)
-	if err != nil {
-		return err
-	}
-	host := map[string]string{"windows": "windows-x86_64", "darwin": "darwin-x86_64"}[runtime.GOOS]
-	if host == "" {
-		host = "linux-x86_64"
+	var ndkBin string
+	if b.cc == "" {
+		ndk, err := findNDK(b.root, b.ndkVersion)
+		if err != nil {
+			return err
+		}
+		host := map[string]string{"windows": "windows-x86_64", "darwin": "darwin-x86_64"}[runtime.GOOS]
+		if host == "" {
+			host = "linux-x86_64"
+		}
+		ndkBin = filepath.Join(ndk, "toolchains", "llvm", "prebuilt", host, "bin")
 	}
 	jniLibs := b.outDir(filepath.Join("android", "app", "src", "main", "jniLibs"))
 
@@ -294,12 +332,17 @@ func (b builder) android(api int) error {
 		if !ok {
 			return fmt.Errorf("unsupported Android architecture %q", arch)
 		}
-		cc := filepath.Join(ndk, "toolchains", "llvm", "prebuilt", host, "bin", fmt.Sprintf("%s%d-clang", target.triple, api))
-		if runtime.GOOS == "windows" {
-			cc += ".cmd"
+		env := []string{"GOOS=android", "GOARCH=" + arch, "CGO_ENABLED=1"}
+		if b.cc != "" {
+			flags := fmt.Sprintf("--target=%s%d", target.triple, api)
+			env = append(env, "CC="+b.cc, "CGO_CFLAGS="+cgoFlags("CGO_CFLAGS", flags), "CGO_LDFLAGS="+cgoFlags("CGO_LDFLAGS", flags))
+		} else {
+			cc := filepath.Join(ndkBin, fmt.Sprintf("%s%d-clang", target.triple, api))
+			if runtime.GOOS == "windows" {
+				cc += ".cmd"
+			}
+			env = append(env, "CC="+cc)
 		}
-
-		env := []string{"GOOS=android", "GOARCH=" + arch, "CGO_ENABLED=1", "CC=" + cc}
 		if arch == "arm" {
 			env = append(env, "GOARM=7")
 		}
@@ -367,7 +410,20 @@ func (b builder) goBuild(env []string, mode, output string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("go build failed: %w", err)
 	}
+	if b.deps != nil {
+		return b.collectDeps(env)
+	}
 	return nil
+}
+
+// cgoFlags adds flags to the value of the cgo flags variable name. Setting
+// the variable replaces Go's default "-O2 -g", so that is kept as well.
+func cgoFlags(name, flags string) string {
+	base := os.Getenv(name)
+	if base == "" {
+		base = "-O2 -g"
+	}
+	return base + " " + flags
 }
 
 // installFat copies a single-architecture library to dst, or merges several

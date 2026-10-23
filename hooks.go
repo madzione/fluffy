@@ -28,19 +28,21 @@ type hook struct {
 
 // hooks returns the patches for the project in root. The GTK patch is
 // optional: it is added with patchGtk and kept once the runner has it.
+//
+// Linux, Windows, Android and macOS build the Go library in the Flutter
+// build hook of golang/ (golang/hook/build.dart). The patches of their build
+// files that older fluffy versions made are removed.
 func hooks(root string, patchGtk bool) []hook {
 	gradle := filepath.Join("android", "app", "build.gradle.kts")
-	gradleHook := gradleKtsHook
 	if _, err := os.Stat(filepath.Join(root, gradle)); err != nil {
 		gradle = filepath.Join("android", "app", "build.gradle")
-		gradleHook = gradleGroovyHook
 	}
 
 	list := []hook{
-		{"linux", filepath.Join("linux", "CMakeLists.txt"), appendBlock(hashMarker, cmakeHook("linux", "libgolang.so"))},
-		{"windows", filepath.Join("windows", "CMakeLists.txt"), appendBlock(hashMarker, cmakeHook("windows", "golang.dll"))},
-		{"android", gradle, appendBlock(slashMarker, gradleHook)},
-		{"macos", filepath.Join("macos", "Runner.xcodeproj", "project.pbxproj"), xcodeHook(macosScript)},
+		{"linux", filepath.Join("linux", "CMakeLists.txt"), removeBlock(hashMarker)},
+		{"windows", filepath.Join("windows", "CMakeLists.txt"), removeBlock(hashMarker)},
+		{"android", gradle, removeBlock(slashMarker)},
+		{"macos", filepath.Join("macos", "Runner.xcodeproj", "project.pbxproj"), removeXcodePhase},
 		{"ios", filepath.Join("ios", "Runner.xcodeproj", "project.pbxproj"), xcodeHook(iosScript)},
 		{"ios", filepath.Join("ios", "Flutter", "Debug.xcconfig"), appendBlock(slashMarker, iosXcconfig)},
 		{"ios", filepath.Join("ios", "Flutter", "Release.xcconfig"), appendBlock(slashMarker, iosXcconfig)},
@@ -90,63 +92,33 @@ func applyHooks(root string, patchGtk bool) error {
 	return nil
 }
 
-// notFound is shown by every hook when the build cannot find fluffy, which
-// otherwise fails with only "Build process failed" or a bare exit code.
+// removeOldLibraries deletes the Android libraries the Gradle hook of older
+// fluffy versions built into the source tree. Gradle would package them
+// next to the ones of the build hook.
+func removeOldLibraries(root string) error {
+	jniLibs := filepath.Join(root, "android", "app", "src", "main", "jniLibs")
+	libs, _ := filepath.Glob(filepath.Join(jniLibs, "*", "libgolang.so"))
+	for _, lib := range libs {
+		if err := os.Remove(lib); err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, lib)
+		fmt.Printf("  removed  %s\n", filepath.ToSlash(rel))
+		// Only removes empty directories.
+		os.Remove(filepath.Dir(lib))
+	}
+	if len(libs) > 0 {
+		os.Remove(jniLibs)
+	}
+	return nil
+}
+
+// notFound is shown by the build hooks when the build cannot find fluffy,
+// which otherwise fails with only "Build process failed" or a bare exit
+// code. golang/hook/build.dart has a copy.
 const notFound = `fluffy was not found on PATH. The Go library of this app is built by the fluffy CLI during the Flutter build. ` +
 	`Install it with "go install github.com/madzione/fluffy@latest" and make sure its directory ` +
 	`(usually $(go env GOPATH)/bin, e.g. ~/go/bin) is on PATH, then build again.`
-
-func cmakeHook(target, lib string) string {
-	return fmt.Sprintf(`# Builds the Go library in golang/ on every build and bundles it with the app.
-# Search again on every configure, a cached path breaks when fluffy moves.
-unset(FLUFFY CACHE)
-find_program(FLUFFY fluffy)
-if(NOT FLUFFY)
-  message(FATAL_ERROR %[3]q)
-endif()
-# The architecture flutter builds for (FLUTTER_TARGET_PLATFORM, e.g.
-# linux-arm64), empty for the host's.
-string(REGEX REPLACE "^[a-z]+-" "" FLUFFY_ARCH "${FLUTTER_TARGET_PLATFORM}")
-add_custom_target(fluffy_golang ALL
-  COMMAND "${FLUFFY}" lib %[1]s --arch "${FLUFFY_ARCH}" -o "${CMAKE_CURRENT_BINARY_DIR}/golang"
-  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
-  COMMENT "Building Go library"
-  VERBATIM
-)
-add_dependencies(${BINARY_NAME} fluffy_golang)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/golang/%[2]s"
-  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)`, target, lib, notFound)
-}
-
-var gradleKtsHook = `// Builds the Go library in golang/ into src/main/jniLibs before every build,
-// for the ABIs flutter builds (only the device's on flutter run) and with the
-// app's NDK.
-val fluffyBuildGo = tasks.register<Exec>("fluffyBuildGo") {
-    workingDir = rootDir.parentFile
-    val abis = (project.findProperty("target-platform") ?: project.findProperty("android.injected.build.abi") ?: "").toString()
-    commandLine("fluffy", "lib", "android", "--arch", abis.replace("android-", ""), "--ndk-version", android.ndkVersion ?: "")
-    doFirst {
-        val onPath = System.getenv("PATH").orEmpty().split(File.pathSeparator)
-            .any { File(it, "fluffy").canExecute() || File(it, "fluffy.exe").canExecute() }
-        if (!onPath) throw GradleException(` + kotlinString(notFound) + `)
-    }
-}
-tasks.named("preBuild") { dependsOn(fluffyBuildGo) }`
-
-var gradleGroovyHook = `// Builds the Go library in golang/ into src/main/jniLibs before every build,
-// for the ABIs flutter builds (only the device's on flutter run) and with the
-// app's NDK.
-tasks.register("fluffyBuildGo", Exec) {
-    workingDir = rootDir.parentFile
-    def abis = (project.findProperty("target-platform") ?: project.findProperty("android.injected.build.abi") ?: "").toString()
-    commandLine "fluffy", "lib", "android", "--arch", abis.replace("android-", ""), "--ndk-version", android.ndkVersion ?: ""
-    doFirst {
-        def onPath = (System.getenv("PATH") ?: "").split(File.pathSeparator)
-            .any { new File(it, "fluffy").canExecute() || new File(it, "fluffy.exe").canExecute() }
-        if (!onPath) throw new GradleException(` + kotlinString(notFound) + `)
-    }
-}
-tasks.named("preBuild") { dependsOn "fluffyBuildGo" }`
 
 // Builds started from the Xcode UI get a minimal PATH without Go or fluffy.
 // Xcode shows lines starting with "error:" in its issue list.
@@ -156,21 +128,16 @@ if ! command -v fluffy >/dev/null 2>&1; then
   exit 1
 fi`
 
-var macosScript = `set -e
-` + xcodePath + `
-cd "$PROJECT_DIR/.."
-fluffy lib macos --arch "$ARCHS" -o "$BUILT_PRODUCTS_DIR/$FRAMEWORKS_FOLDER_PATH"
-codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" "$BUILT_PRODUCTS_DIR/$FRAMEWORKS_FOLDER_PATH/libgolang.dylib"
-`
-
 var iosScript = `set -e
 ` + xcodePath + `
 cd "$PROJECT_DIR/.."
 fluffy lib ios --sdk "$PLATFORM_NAME" --arch "$ARCHS"
 `
 
-// iOS links the Go archive statically. Dart looks the symbols up at runtime,
-// so they must survive stripping.
+// iOS links the Go archive statically: Go can't build a shared library for
+// iOS, and Flutter only bundles shared ones. The build hook declares the
+// library as found in the process. Dart looks the symbols up at runtime, so
+// they must survive stripping.
 const iosXcconfig = `OTHER_LDFLAGS = $(inherited) -force_load "$(PROJECT_DIR)/../build/fluffy/ios/$(PLATFORM_NAME)/libgolang.a" -framework CoreFoundation -framework Security -lresolv
 STRIP_STYLE = non-global`
 
@@ -205,7 +172,6 @@ const webLoader = `<script src="wasm_exec.js"></script>
 </script>`
 
 const gitignore = `# Go libraries built by fluffy
-/android/app/src/main/jniLibs/*/libgolang.so
 /web/golang.wasm
 /web/wasm_exec.js`
 
@@ -235,6 +201,21 @@ func patchIndexHTML(content string) (string, error) {
 	return upsertBlock(content, htmlMarker, webLoader, "  ", "</body>")
 }
 
+// removeBlock removes the marked block and the empty line appendBlock put
+// before it.
+func removeBlock(m marker) func(string) (string, error) {
+	return func(content string) (string, error) {
+		start, end, err := findBlock(content, m)
+		if err != nil || start < 0 {
+			return content, err
+		}
+		if strings.HasSuffix(content[:start], "\n\n") {
+			start--
+		}
+		return content[:start] + content[end:], nil
+	}
+}
+
 func appendBlock(m marker, body string) func(string) (string, error) {
 	return func(content string) (string, error) {
 		return upsertBlock(content, m, body, "", "")
@@ -257,16 +238,12 @@ func upsertBlock(content string, m marker, body, indent, anchor string) (string,
 		block.WriteString(line + "\n")
 	}
 
-	if start := strings.Index(content, m.begin); start >= 0 {
-		end := strings.Index(content[start:], m.end)
-		if end < 0 {
-			return "", fmt.Errorf("%q has no matching %q, remove the rest of the fluffy block or add the end marker", m.begin, m.end)
-		}
-		end += start + len(m.end)
-		if end < len(content) && content[end] == '\n' {
-			end++
-		}
-		return content[:lineStart(content, start)] + block.String() + content[end:], nil
+	start, end, err := findBlock(content, m)
+	if err != nil {
+		return "", err
+	}
+	if start >= 0 {
+		return content[:start] + block.String() + content[end:], nil
 	}
 
 	if anchor != "" {
@@ -282,6 +259,26 @@ func upsertBlock(content string, m marker, body, indent, anchor string) (string,
 		content += "\n"
 	}
 	return content + block.String(), nil
+}
+
+// findBlock returns the lines of the marked block in content, from the
+// start of the begin marker's line to after the end marker's line, or -1
+// when there is none. A begin marker without an end marker is an error,
+// guessing where the block ended could remove the user's code.
+func findBlock(content string, m marker) (start, end int, err error) {
+	start = strings.Index(content, m.begin)
+	if start < 0 {
+		return -1, -1, nil
+	}
+	end = strings.Index(content[start:], m.end)
+	if end < 0 {
+		return -1, -1, fmt.Errorf("%q has no matching %q, remove the rest of the fluffy block or add the end marker", m.begin, m.end)
+	}
+	end += start + len(m.end)
+	if end < len(content) && content[end] == '\n' {
+		end++
+	}
+	return lineStart(content, start), end, nil
 }
 
 func lineStart(content string, i int) int {
@@ -313,13 +310,9 @@ func xcodeHook(script string) func(string) (string, error) {
 			"\t\t};\n"
 
 		// Replace an earlier version of the phase.
-		if start := strings.Index(content, "\n\t\t"+xcodePhaseID+" /* "+xcodePhaseName+" */ = {\n"); start >= 0 {
-			start++
-			end := strings.Index(content[start:], "\n\t\t};\n")
-			if end < 0 {
-				return "", errors.New("unterminated fluffy build phase")
-			}
-			content = content[:start] + content[start+end+len("\n\t\t};\n"):]
+		content, err := cutXcodePhase(content)
+		if err != nil {
+			return "", err
 		}
 		at := strings.Index(content, section)
 		if at < 0 {
@@ -350,10 +343,27 @@ func xcodeHook(script string) func(string) (string, error) {
 	}
 }
 
-// kotlinString quotes s for Kotlin and Groovy. Groovy interpolates $ in
-// double quoted strings, so it is escaped for both.
-func kotlinString(s string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(s) + `"`
+// cutXcodePhase removes the definition of the build phase.
+func cutXcodePhase(content string) (string, error) {
+	start := strings.Index(content, "\n\t\t"+xcodePhaseID+" /* "+xcodePhaseName+" */ = {\n")
+	if start < 0 {
+		return content, nil
+	}
+	start++
+	end := strings.Index(content[start:], "\n\t\t};\n")
+	if end < 0 {
+		return "", errors.New("unterminated fluffy build phase")
+	}
+	return content[:start] + content[start+end+len("\n\t\t};\n"):], nil
+}
+
+// removeXcodePhase removes the build phase and its use in the Runner target.
+func removeXcodePhase(content string) (string, error) {
+	content, err := cutXcodePhase(content)
+	if err != nil {
+		return "", err
+	}
+	return strings.Replace(content, "\t\t\t\t"+xcodePhaseID+" /* "+xcodePhaseName+" */,\n", "", 1), nil
 }
 
 // shellString quotes s for sh.

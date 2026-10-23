@@ -106,25 +106,3 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
-
-# fluffy:begin
-# Builds the Go library in golang/ on every build and bundles it with the app.
-# Search again on every configure, a cached path breaks when fluffy moves.
-unset(FLUFFY CACHE)
-find_program(FLUFFY fluffy)
-if(NOT FLUFFY)
-  message(FATAL_ERROR "fluffy was not found on PATH. The Go library of this app is built by the fluffy CLI during the Flutter build. Install it with \"go install github.com/madzione/fluffy@latest\" and make sure its directory (usually $(go env GOPATH)/bin, e.g. ~/go/bin) is on PATH, then build again.")
-endif()
-# The architecture flutter builds for (FLUTTER_TARGET_PLATFORM, e.g.
-# linux-arm64), empty for the host's.
-string(REGEX REPLACE "^[a-z]+-" "" FLUFFY_ARCH "${FLUTTER_TARGET_PLATFORM}")
-add_custom_target(fluffy_golang ALL
-  COMMAND "${FLUFFY}" lib windows --arch "${FLUFFY_ARCH}" -o "${CMAKE_CURRENT_BINARY_DIR}/golang"
-  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
-  COMMENT "Building Go library"
-  VERBATIM
-)
-add_dependencies(${BINARY_NAME} fluffy_golang)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/golang/golang.dll"
-  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
-# fluffy:end
