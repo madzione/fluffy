@@ -195,14 +195,19 @@ fluffy run
 
 ## Agent skill
 
-[`skills/fluffy/SKILL.md`](skills/fluffy/SKILL.md) is an [agent skill](https://docs.claude.com/en/docs/claude-code/skills) that teaches coding agents like Claude Code how to work in a fluffy project: the commands, which files are generated or owned by fluffy, how Go turns into Dart, testing and the usual pitfalls. Install it for all your projects:
+[`skills/fluffy/`](skills/fluffy/SKILL.md) is an [agent skill](https://docs.claude.com/en/docs/claude-code/skills) that teaches coding agents like Claude Code how to work in a fluffy project: the commands, which files are generated or owned by fluffy, how Go turns into Dart, testing and the usual pitfalls. `SKILL.md` stays short; the agent reads the files in `references/` only when it needs them. Install it with [`skills`](https://github.com/vercel-labs/skills), which also sets it up for other agents that support skills:
 
 ```sh
-mkdir -p ~/.claude/skills/fluffy
-curl -fsSL https://raw.githubusercontent.com/madzione/fluffy/main/skills/fluffy/SKILL.md -o ~/.claude/skills/fluffy/SKILL.md
+npx skills add madzione/fluffy        # this project (commit it so everyone working on the app gets it)
+npx skills add madzione/fluffy -g     # all your projects
 ```
 
-or for one project (commit it so everyone working on the app gets it) by putting it into `.claude/skills/fluffy/SKILL.md` instead. Other agents that support skills read the same file from their own skills directory.
+Without Node, copy the directory into `~/.claude/skills` (or `.claude/skills` in the project) yourself:
+
+```sh
+mkdir -p ~/.claude/skills
+curl -fsSL https://github.com/madzione/fluffy/archive/main.tar.gz | tar -xz -C ~/.claude/skills --strip-components=2 fluffy-main/skills/fluffy
+```
 
 ## Generated API
 
