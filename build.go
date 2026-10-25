@@ -227,16 +227,24 @@ func (b builder) macos() error {
 	}
 	defer os.RemoveAll(tmp)
 
-	// Room in the header for the install name Flutter gives the library.
-	flags := "-Wl,-headerpad_max_install_names"
+	// Flags for both compiling and linking.
+	var common []string
 	if b.minOS != "" {
-		flags += " -mmacosx-version-min=" + b.minOS
+		common = append(common, "-mmacosx-version-min="+b.minOS)
 	}
+	// The clang a build hook passes with --cc is the toolchain binary, not
+	// the /usr/bin/clang shim: without SDKROOT, which the hook doesn't
+	// inherit, it finds no SDK headers.
+	if sdkPath, err := output("xcrun", "--sdk", "macosx", "--show-sdk-path"); err == nil {
+		common = append(common, "-isysroot", sdkPath)
+	}
+	// Room in the header for the install name Flutter gives the library.
+	ldflags := strings.Join(append([]string{"-Wl,-headerpad_max_install_names"}, common...), " ")
 	for _, arch := range archs {
 		part := filepath.Join(tmp, arch, "libgolang.dylib")
-		env := []string{"GOOS=darwin", "GOARCH=" + arch, "CGO_ENABLED=1", "CGO_LDFLAGS=" + cgoFlags("CGO_LDFLAGS", flags)}
-		if b.minOS != "" {
-			env = append(env, "CGO_CFLAGS="+cgoFlags("CGO_CFLAGS", "-mmacosx-version-min="+b.minOS))
+		env := []string{"GOOS=darwin", "GOARCH=" + arch, "CGO_ENABLED=1", "CGO_LDFLAGS=" + cgoFlags("CGO_LDFLAGS", ldflags)}
+		if len(common) > 0 {
+			env = append(env, "CGO_CFLAGS="+cgoFlags("CGO_CFLAGS", strings.Join(common, " ")))
 		}
 		if b.cc != "" {
 			env = append(env, "CC="+b.cc)
